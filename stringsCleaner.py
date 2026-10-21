@@ -38,6 +38,40 @@ _ALL_SUBJECT_VALUES_LOWER = [
     v.lower() for v in list(subject_replacements.values()) + list(small_subject_replacements.values())
 ]
 _SUBJECT_ITEMS = [(k, k.lower(), v) for k, v in subject_replacements.items()]
+# (ключ + ",", ключ, значение) — «Воронежская,» в начале строки; конкатенация делается один раз
+_SUBJECT_STARTS = [(kl + ",", k, v) for k, kl, v in _SUBJECT_ITEMS]
+# Если ни один ключ не содержит запятой, «строка начинается с ключ + ","» означает, что
+# часть строки до первой запятой равна ключу — это один поиск в словаре вместо 80 startswith.
+if any("," in k for k, _kl, _v in _SUBJECT_ITEMS):
+    _SUBJECT_START_MAP = None
+else:
+    _SUBJECT_START_MAP = {}
+    for _k, _kl, _v in _SUBJECT_ITEMS:
+        _SUBJECT_START_MAP.setdefault(_kl, (_k, _v))  # при совпадении побеждает первый ключ
+
+
+def _extra_subject(address_lower):
+    """Перечень исключений (в том же порядке приоритета, что и раньше). None — ничего не подошло."""
+    if "респ" in address_lower:
+        if "алтай" in address_lower:
+            return "Республика Алтай"
+        if "крым" in address_lower:
+            return "Республика Крым"
+        if "коми" in address_lower:
+            return "Республика Коми"
+    if ("алтайский" in address_lower) and ("кр" in address_lower):
+        return "Алтайский край"
+    if "костромская" in address_lower:
+        return "Костромская область"
+    if "томская" in address_lower:
+        return "Томская область"
+    if "омская" in address_lower:
+        return "Омская область"
+    if "ямало" in address_lower:
+        return "Ямало-Ненецкий автономный округ"
+    if "ненецкий" in address_lower:
+        return "Ненецкий автономный округ"
+    return None
 
 _RE_ZIP8 = re.compile(r"\b\d{8},\s*")
 _RE_ZIP7 = re.compile(r"\b\d{7},\s*")
@@ -96,51 +130,42 @@ def process_address(address):
     found = False
 
     # "Воронежская," в начале строки -> "Воронежская область,"
-    for key, key_lower, value in _SUBJECT_ITEMS:
-        if address_lower.startswith(key_lower + ","):
-            address = address.replace(key, value)
+    if _SUBJECT_START_MAP is not None:
+        hit = _SUBJECT_START_MAP.get(address_lower.split(",", 1)[0]) if "," in address_lower else None
+        if hit is not None:
+            address = address.replace(hit[0], hit[1])
             found = True
-            break
+    else:
+        for start_key, key, value in _SUBJECT_STARTS:
+            if address_lower.startswith(start_key):
+                address = address.replace(key, value)
+                found = True
+                break
 
     # Прямое включение названия субъекта РФ
-    for value_lower in _ALL_SUBJECT_VALUES_LOWER:
-        if value_lower in address_lower:
-            found = True
-            break
-
-    # Если не нашли — ищем по уникальному ключу, затем по списку исключений
     if not found:
-        for key, key_lower, value in _SUBJECT_ITEMS:
-            if key_lower in address_lower:
-                address = value + separator + address
+        for value_lower in _ALL_SUBJECT_VALUES_LOWER:
+            if value_lower in address_lower:
+                found = True
                 break
-            elif ("алтай" in address_lower) and ("респ" in address_lower):
-                address = "Республика Алтай" + separator + address
-                break
-            elif ("крым" in address_lower) and ("респ" in address_lower):
-                address = "Республика Крым" + separator + address
-                break
-            elif ("коми" in address_lower) and ("респ" in address_lower):
-                address = "Республика Коми" + separator + address
-                break
-            elif ("алтайский" in address_lower) and ("кр" in address_lower):
-                address = "Алтайский край" + separator + address
-                break
-            elif "костромская" in address_lower:
-                address = "Костромская область" + separator + address
-                break
-            elif "томская" in address_lower:
-                address = "Томская область" + separator + address
-                break
-            elif "омская" in address_lower:
-                address = "Омская область" + separator + address
-                break
-            elif "ямало" in address_lower:
-                address = "Ямало-Ненецкий автономный округ" + separator + address
-                break
-            elif "ненецкий" in address_lower:
-                address = "Ненецкий автономный округ" + separator + address
-                break
+
+    # Если не нашли — ищем по уникальному ключу, затем по списку исключений.
+    # Логика прежнего цикла «for key ...: if key in addr / elif исключение_1 / elif ...»:
+    # условия исключений не зависят от ключа, поэтому на первой итерации проверяется
+    # первый ключ, затем исключения, а дальше — только остальные ключи по порядку.
+    if not found and _SUBJECT_ITEMS:
+        _k0, k0_lower, v0 = _SUBJECT_ITEMS[0]
+        if k0_lower in address_lower:
+            address = v0 + separator + address
+        else:
+            extra = _extra_subject(address_lower)
+            if extra is not None:
+                address = extra + separator + address
+            else:
+                for _key, key_lower, value in _SUBJECT_ITEMS[1:]:
+                    if key_lower in address_lower:
+                        address = value + separator + address
+                        break
 
     # Добавляем субъект РФ перед городом
     address = add_region_to_town_prepared(address, _TOWN_REGION, separator)

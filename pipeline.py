@@ -81,14 +81,63 @@ COL_OKTMO_REF = "ОКТМО"
 # ---------------------------------------------------------------------------
 # Чтение Excel
 # ---------------------------------------------------------------------------
-def read_excel_fast(src, **kw) -> pd.DataFrame:
-    """calamine читает xlsx в разы быстрее openpyxl; при его отсутствии — openpyxl."""
+_XLS_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"  # OLE2-контейнер: настоящий .xls (BIFF)
+_ZIP_MAGIC = b"PK\x03\x04"  # ZIP: .xlsx / .xlsm / .xlsb
+
+
+def sniff_excel_format(src) -> str:
+    """Определяет формат по первым байтам файла, а не по расширению (оно часто врёт).
+
+    'xls'  — старый двоичный Excel 97-2003;
+    'xlsx' — современный Excel (ZIP/OOXML);
+    'html' — «.xls», который на самом деле HTML/XML/текст (так часто выгружают из веб-систем);
+    ''     — не удалось определить (пробуем читать как есть).
+    """
     try:
-        return pd.read_excel(src, engine="calamine", **kw)
-    except ImportError:
+        if hasattr(src, "read"):
+            pos = src.tell() if hasattr(src, "tell") else 0
+            head = src.read(8)
+            src.seek(pos)
+        else:
+            with open(src, "rb") as f:
+                head = f.read(8)
+    except Exception:
+        return ""
+    if head.startswith(_XLS_MAGIC):
+        return "xls"
+    if head.startswith(_ZIP_MAGIC):
+        return "xlsx"
+    if head.lstrip(b"\xef\xbb\xbf \t\r\n")[:1] == b"<":
+        return "html"
+    return ""
+
+
+def read_excel_fast(src, **kw) -> pd.DataFrame:
+    """Читает .xlsx и .xls. calamine (Rust) в разы быстрее openpyxl/xlrd и понимает оба формата;
+    если он не установлен или не справился — запасной движок: xlrd для .xls, openpyxl для .xlsx."""
+    fmt = sniff_excel_format(src)
+    if fmt == "html":
+        raise ValueError(
+            "Файл с расширением .xls на самом деле не книга Excel (это HTML/текст). "
+            "Откройте его в Excel и сохраните как «Книга Excel (.xlsx)»."
+        )
+    engines = ["calamine", "xlrd"] if fmt == "xls" else ["calamine", "openpyxl"]
+    problems = []
+    for engine in engines:
         if hasattr(src, "seek"):
             src.seek(0)
-        return pd.read_excel(src, **kw)
+        try:
+            return pd.read_excel(src, engine=engine, **kw)
+        except ImportError:
+            problems.append(f"{engine}: не установлен")
+        except Exception as e:  # повреждённый файл, пароль и т.п. — пробуем следующий движок
+            problems.append(f"{engine}: {e}")
+    if fmt == "xls" and all("не установлен" in p for p in problems):
+        raise ValueError("Для чтения .xls установите пакет python-calamine или xlrd (pip install python-calamine xlrd).")
+    raise ValueError(
+        "Не удалось прочитать файл как Excel (.xlsx/.xls). Файл повреждён или защищён паролем? "
+        + "; ".join(problems)
+    )
 
 
 def default_workers() -> int:
@@ -274,11 +323,44 @@ def _match_chunk(chunk: list[str]):
     return [m.match(a) for a in chunk]
 
 
-def run_parallel(func, items, workers, min_parallel, on_progress=None, initializer=None, initargs=(), weights=None):
+class SharedPool:
+    """Один пул процессов на оба этапа (очистка и распознавание).
+
+    Запуск процессов (spawn) и передача справочника в каждый из них занимают секунды, поэтому
+    пул создаётся лениво — только если какому-то этапу реально нужен параллелизм — и
+    закрывается один раз в конце обработки файла.
+    """
+
+    def __init__(self, workers: int, index: OktmoIndex):
+        self.workers, self.index, self._ex = workers, index, None
+
+    def get(self):
+        if self._ex is None:
+            self._ex = ProcessPoolExecutor(
+                max_workers=self.workers,
+                mp_context=mp.get_context("spawn"),
+                initializer=_init_matcher,
+                initargs=(self.index,),
+            )
+        return self._ex
+
+    def reset(self):  # после сбоя процессов — выбросить сломанный пул, при необходимости создадим новый
+        if self._ex is not None:
+            self._ex.shutdown(wait=False, cancel_futures=True)
+            self._ex = None
+
+    def close(self):
+        if self._ex is not None:
+            self._ex.shutdown(wait=True)
+            self._ex = None
+
+
+def run_parallel(func, items, workers, min_parallel, on_progress=None, initializer=None, initargs=(), weights=None, pool=None):
     """Применяет func к чанкам items; возвращает плоский список результатов в исходном порядке.
 
     weights — сколько строк исходного файла соответствует каждому элементу (уникальному адресу);
     прогресс считается в строках файла, а не в уникальных значениях.
+    pool — общий SharedPool; если не задан, пул создаётся и закрывается внутри вызова.
     """
     n = len(items)
     if n == 0:
@@ -306,24 +388,33 @@ def run_parallel(func, items, workers, min_parallel, on_progress=None, initializ
     chunk_w = [prefix[min(i + chunk, n)] - prefix[i] for i in starts]
     results: list = [None] * len(chunks)
     done = 0
+    own = None
     try:
-        with ProcessPoolExecutor(
-            max_workers=workers,
-            mp_context=mp.get_context("spawn"),
-            initializer=initializer,
-            initargs=initargs,
-        ) as ex:
-            futs = {ex.submit(func, c): i for i, c in enumerate(chunks)}
-            for f in as_completed(futs):
-                i = futs[f]
-                results[i] = f.result()
-                done += chunk_w[i]
-                if on_progress:
-                    on_progress(done, total_w)
+        if pool is not None:
+            ex = pool.get()
+        else:
+            ex = own = ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=mp.get_context("spawn"),
+                initializer=initializer,
+                initargs=initargs,
+            )
+        futs = {ex.submit(func, c): i for i, c in enumerate(chunks)}
+        for f in as_completed(futs):
+            i = futs[f]
+            results[i] = f.result()
+            done += chunk_w[i]
+            if on_progress:
+                on_progress(done, total_w)
     except Exception as e:  # BrokenProcessPool и т.п. -> считаем в одном процессе
+        if pool is not None:
+            pool.reset()
         if isinstance(e, (ValueError, KeyError, TypeError)):
             raise
         return run_parallel(func, items, 1, min_parallel, on_progress, initializer, initargs, weights)
+    finally:
+        if own is not None:
+            own.shutdown(wait=True)
     return [r for part in results for r in part]
 
 
@@ -376,7 +467,18 @@ def build_xlsx(
     src_col: str = COL_SRC, clean_col: str = COL_CLEAN,
 ) -> bytes:
     buf = io.BytesIO()
-    wb = xlsxwriter.Workbook(buf, {"constant_memory": True, "nan_inf_to_errors": True})
+    # strings_to_*: False — не проверять каждую строку на «ссылку/формулу/число» (быстрее) и не превращать
+    # адреса вида «http…», «=…» в гиперссылки/формулы (у Excel есть лимит ~65 тыс. гиперссылок)
+    wb = xlsxwriter.Workbook(
+        buf,
+        {
+            "constant_memory": True,
+            "nan_inf_to_errors": True,
+            "strings_to_urls": False,
+            "strings_to_formulas": False,
+            "strings_to_numbers": False,
+        },
+    )
     ws = wb.add_worksheet("Sheet1")
     f_head = wb.add_format({"bold": True, "border": 1})
     f_green = wb.add_format({"bg_color": "#92D050"})
@@ -447,8 +549,20 @@ STAGES = [
 
 
 def run_pipeline(file_obj, index: OktmoIndex, progress=None, workers: int | None = None) -> Result:
-    """progress(frac, stage_title, done, total) — необязательный колбэк для индикатора."""
+    """progress(frac, stage_title, done, total) — необязательный колбэк для индикатора.
+
+    Принимает .xlsx и .xls (формат определяется по содержимому); результат — всегда .xlsx.
+    """
     workers = workers or default_workers()
+    pool = SharedPool(workers, index) if workers > 1 else None  # один пул на очистку и распознавание
+    try:
+        return _run_pipeline(file_obj, index, progress, workers, pool)
+    finally:
+        if pool is not None:
+            pool.close()
+
+
+def _run_pipeline(file_obj, index: OktmoIndex, progress, workers: int, pool) -> Result:
     t0 = time.time()
     timings: dict = {}
     base = {k: sum(s[2] for s in STAGES[:i]) for i, (k, _, _) in enumerate(STAGES)}
@@ -486,7 +600,7 @@ def run_pipeline(file_obj, index: OktmoIndex, progress=None, workers: int | None
     uniq = src.unique().tolist()
     w_clean = src.value_counts().reindex(uniq).tolist()  # строк файла на каждый уникальный адрес
     cleaned = run_parallel(
-        _clean_chunk, uniq, workers, MIN_PARALLEL_CLEAN, stage_cb("clean"), weights=w_clean
+        _clean_chunk, uniq, workers, MIN_PARALLEL_CLEAN, stage_cb("clean"), weights=w_clean, pool=pool
     )
     df[clean_col] = src.map(dict(zip(uniq, cleaned)))
     timings["clean"] = time.time() - ts
@@ -498,7 +612,7 @@ def run_pipeline(file_obj, index: OktmoIndex, progress=None, workers: int | None
     w_match = df[clean_col].value_counts().reindex(uniq_c).tolist()
     matched = run_parallel(
         _match_chunk, uniq_c, workers, MIN_PARALLEL_MATCH, stage_cb("match"),
-        initializer=_init_matcher, initargs=(index,), weights=w_match,
+        initializer=_init_matcher, initargs=(index,), weights=w_match, pool=pool,
     )
     mp_ = dict(zip(uniq_c, matched))
     empty = ("", "", "", "")

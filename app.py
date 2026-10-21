@@ -72,7 +72,8 @@ CSS = f"""
 .block-container {{max-width: 1500px; padding-top: 2.5rem;}}
 
 /* Заголовок и подзаголовок по центру */
-h1.hero {{text-align:center; font-weight:800; font-size:2.6rem; color:#1f1f1f; margin:0 0 .4rem 0;}}
+h1.hero {{text-align:center; font-weight:800; font-size:2.6rem; color:#1f1f1f; margin:0 0 0 0;}}
+h2.hero {{text-align:center; font-weight:600; font-size:2.0rem; color:#1f1f1f; margin:0 0 .4rem 0;}}
 p.sub {{text-align:center; color:#666; margin-bottom:1.6rem;}}
 
 /* ===== Синяя зона загрузки файла ===== */
@@ -93,7 +94,7 @@ p.sub {{text-align:center; color:#666; margin-bottom:1.6rem;}}
 [data-testid="stFileUploaderDropzoneInstructions"] {{ order:3; text-align:center; }}
 [data-testid="stFileUploaderDropzoneInstructions"] * {{ display:none !important; }}
 [data-testid="stFileUploaderDropzoneInstructions"]::after {{
-    content:"или перетащите файл .xlsx сюда"; color:#e0efff; font-size:1rem;
+    content:"или перетащите файл .xlsx / .xls сюда"; color:#e0efff; font-size:1rem;
 }}
 /* Белая кнопка выбора файла с русской подписью.
    Красим только stBaseButton-secondary, чтобы не задеть кнопки «удалить»/«добавить». */
@@ -147,7 +148,8 @@ p.sub {{text-align:center; color:#666; margin-bottom:1.6rem;}}
 }}
 </style>
 <h1 class="hero">Простановка кодов ОКТМО</h1>
-<p class="sub">Загрузите Excel-файл с колонкой адресов («Местонахождение», «Адрес» или любой заголовок со словом «Адрес») — адреса будут очищены,
+<h2 class="hero">Справочник ОКТМО актуален на 01.01.2025</h2>
+<p class="sub">Загрузите Excel-файл (.xlsx или .xls) с колонкой адресов («Местонахождение», «Адрес» или любой заголовок со словом «Адрес») — адреса будут очищены,
 распознаны и дополнены субъектом, районом, населённым пунктом и кодом ОКТМО.</p>
 """
 
@@ -234,8 +236,8 @@ def main():
         st.error(f"Не найден справочник ОКТМО: {OKTMO_FILE.name}. Положите его рядом с app.py.")
         st.stop()
 
-    # Красная/синяя зона загрузки. Подпись скрыта (label_visibility="collapsed"), принимаем только .xlsx
-    uploaded = st.file_uploader("Excel-файл", type=["xlsx"], label_visibility="collapsed")
+    # Синяя зона загрузки. Подпись скрыта (label_visibility="collapsed"); принимаем .xlsx и .xls
+    uploaded = st.file_uploader("Excel-файл", type=["xlsx", "xls"], label_visibility="collapsed")
 
     # Файла нет (или его удалили крестиком) — сбрасываем прошлый результат и ждём загрузки
     if uploaded is None:
