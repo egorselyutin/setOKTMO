@@ -1,0 +1,16 @@
+# Файл кладётся в папку .streamlit рядом с app.py
+
+[server]
+maxUploadSize = 1024          # МБ, максимальный размер загружаемого файла
+enableXsrfProtection = true
+
+[theme]
+base = "light"
+# Основной цвет темы — синий
+primaryColor = "#2B60E2"
+# >>> ИЗМЕНЕНО: цвет текста заголовков колонок в таблице предпросмотра.
+# По умолчанию Streamlit делает его блеклым (60% от цвета текста). Чёрный — максимально контрастный.
+dataframeHeaderTextColor = "#111111"
+
+[browser]
+gatherUsageStats = false
