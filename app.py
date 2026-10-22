@@ -8,15 +8,26 @@
   5. Защитный вызов main() (нужен для Windows, см. комментарий в самом конце).
 """
 
+from __future__ import annotations  # аннотации не вычисляются при импорте (нужно для условных импортов ниже)
+
+import io
 import multiprocessing as mp
 import os
 import time
 from pathlib import Path
 
-import pandas as pd
-import streamlit as st
+# Дочерние процессы (spawn) заново импортируют этот файл как «__mp_main__». Интерфейс им не нужен,
+# поэтому тяжёлые библиотеки интерфейса (streamlit, pandas) в них не загружаем: это экономит память
+# и секунды запуска каждого процесса.
+# Признак надёжнее всего — имя модуля: при импорте в дочернем процессе mp.parent_process() ещё None.
+_IS_CHILD = __name__ == "__mp_main__" or mp.parent_process() is not None
+if not _IS_CHILD:
+    import pandas as pd
+    import streamlit as st
+    from streamlit.runtime.scriptrunner import get_script_run_ctx
 
-import pipeline  # здесь вся «математика»: очистка, распознавание, формирование Excel
+    import jobs  # фоновые задания: обработка не прерывается «перезапусками» страницы
+    import pipeline  # здесь вся «математика»: очистка, распознавание, формирование Excel
 
 # ---------------------------------------------------------------------------
 # 1. КОНСТАНТЫ
@@ -236,68 +247,85 @@ def main():
         st.error(f"Не найден справочник ОКТМО: {OKTMO_FILE.name}. Положите его рядом с app.py.")
         st.stop()
 
+    # Диспетчер фоновых заданий — один на весь сервер (кэшируется между перезапусками страницы)
+    @st.cache_resource
+    def get_manager() -> jobs.JobManager:
+        return jobs.JobManager()
+
+    mgr = get_manager()
+    # Идентификатор сессии браузера: нужен, чтобы результаты разных пользователей не смешивались
+    ctx = get_script_run_ctx()
+    session = ctx.session_id if ctx else "local"
+
     # Синяя зона загрузки. Подпись скрыта (label_visibility="collapsed"); принимаем .xlsx и .xls
     uploaded = st.file_uploader("Excel-файл", type=["xlsx", "xls"], label_visibility="collapsed")
 
-    # Файла нет (или его удалили крестиком) — сбрасываем прошлый результат и ждём загрузки
+    # Файла нет (или его удалили крестиком) — останавливаем и забываем задание, освобождаем память
     if uploaded is None:
-        st.session_state.pop("job", None)
+        mgr.cancel_session(session)
         st.stop()
 
-    # Идентификатор «задания»: имя + размер + внутренний id файла.
-    # По нему отличаем «новый файл» от «повторной перерисовки страницы».
+    mgr.purge()  # заодно убираем старые завершённые задания (экономим память сервера)
+
+    # Ключ задания: сессия + имя + размер + внутренний id файла.
+    # По нему отличаем «новый файл» от «страница перезапустилась, а работа уже идёт/закончена».
     job_id = f"{uploaded.name}:{uploaded.size}:{getattr(uploaded, 'file_id', '')}"
+    key = f"{session}|{job_id}"
     out_name = f"{Path(uploaded.name).stem}_cleaned_processed.xlsx"  # имя скачиваемого файла
-    job = st.session_state.get("job")
 
-    # Этот файл уже обработан (например, страница перерисовалась после нажатия «Скачать»):
-    # просто показываем сохранённый результат, ничего не пересчитываем.
-    if job and job["id"] == job_id:
-        if job.get("error"):
-            st.error(job["error"])
+    job = mgr.get(key)
+    if job is None:
+        # Задания ещё нет (новый файл или сервер перезапускался) — запускаем обработку В ФОНЕ.
+        try:
+            index = get_index(str(OKTMO_FILE), OKTMO_FILE.stat().st_mtime)  # справочник (из кэша)
+        except Exception as e:
+            st.error(f"Не удалось загрузить справочник ОКТМО: {e}")
+            st.stop()
+        data = uploaded.getvalue()  # байты файла: поток не должен обращаться к объектам Streamlit
+
+        def target(j):
+            return pipeline.run_pipeline(io.BytesIO(data), index, progress=j.report)
+
+        # Строка в логах сервера («Manage app» -> Logs): помогает понять, чем ограничен сервер
+        print(f"[oktmo] старт: «{uploaded.name}», {uploaded.size / 1e6:.1f} МБ; {pipeline.resource_summary()}", flush=True)
+        job = mgr.start(key, session, target)
+
+    # Обработка ещё идёт: показываем прогресс. Если страница перезапустится, она подключится
+    # к этому же заданию (работа не теряется и не начинается заново).
+    was_running = not job.done
+    if was_running:
+        st.info(f"Файл «{uploaded.name}» загружен ({uploaded.size / 1024 / 1024:.1f} МБ). Идёт обработка…")
+        bar = st.progress(0.0, text="Подготовка…")  # прогресс-бар (цвет — см. CSS)
+        while not job.done:
+            if job.queued:
+                bar.progress(0.0, text="В очереди: сервер сейчас обрабатывает другой файл…")
+            else:
+                frac, stage, done, total = job.progress
+                elapsed = time.time() - (job.started or time.time())
+                # Оценка оставшегося времени по пройденной доле (показываем после первых 3%)
+                eta = f" • осталось ≈ {fmt_time(elapsed / frac * (1 - frac))}" if frac > 0.03 else ""
+                # Счётчик «обработано/всего» — только если этап считает строки
+                detail = f" ({done:,}/{total:,})".replace(",", " ") if total > 1 else ""
+                bar.progress(min(frac, 1.0), text=f"{stage}{detail} — {frac * 100:.0f}%{eta}")
+            time.sleep(0.4)
+        if job.error:
+            bar.empty()
         else:
-            show_result(job["result"], out_name)
+            bar.progress(1.0, text="Обработка завершена — 100%")
+
+    # Итог: ошибка или результат
+    if job.error:
+        st.error(job.error)
+        st.stop()
+    if job.result is None:  # задание было отменено/прервано без результата
+        st.warning("Обработка была прервана. Загрузите файл ещё раз.")
         st.stop()
 
-    # --- Автоматическая обработка сразу после загрузки (без кнопок) ---
-    st.session_state["job"] = {"id": job_id}  # помечаем: обработка этого файла началась
-    st.info(f"Файл «{uploaded.name}» загружен ({uploaded.size / 1024 / 1024:.1f} МБ). Идёт обработка…")
-    bar = st.progress(0.0, text="Подготовка…")  # прогресс-бар (цвет — см. CSS)
-    t_start = time.time()
-    last = [0.0]  # время последнего обновления (список, чтобы менять из вложенной функции)
+    show_result(job.result, out_name)
 
-    def on_progress(frac, stage, done, total):
-        """Вызывается из pipeline: frac — доля готовности (0..1), done/total — строки текущего этапа."""
-        now = time.time()
-        # Не обновляем интерфейс чаще, чем раз в 0.15 с (иначе он будет тормозить)
-        if now - last[0] < 0.15 and frac < 1:
-            return
-        last[0] = now
-        elapsed = now - t_start
-        # Оценка оставшегося времени по пройденной доле (показываем после первых 3%)
-        eta = f" • осталось ≈ {fmt_time(elapsed / frac * (1 - frac))}" if frac > 0.03 else ""
-        # Счётчик «обработано/всего» — только если этап считает строки
-        detail = f" ({done:,}/{total:,})".replace(",", " ") if total > 1 else ""
-        bar.progress(min(frac, 1.0), text=f"{stage}{detail} — {frac * 100:.0f}%{eta}")
-
-    try:
-        index = get_index(str(OKTMO_FILE), OKTMO_FILE.stat().st_mtime)  # справочник (из кэша)
-        res = pipeline.run_pipeline(uploaded, index, progress=on_progress)  # вся обработка
-    except Exception as e:  # любая ошибка — показываем пользователю понятным текстом
-        bar.empty()
-        msg = f"Не удалось обработать файл: {e}"
-        st.session_state["job"] = {"id": job_id, "error": msg}
-        st.error(msg)
-        st.stop()
-
-    # Успех: фиксируем 100%, сохраняем результат в сессии и показываем его
-    bar.progress(1.0, text="Обработка завершена — 100%")
-    st.session_state["job"] = {"id": job_id, "result": res}
-    show_result(res, out_name)
-
-    # Звук завершения. Играет один раз — только в этом прогоне (при повторных перерисовках
-    # страницы эта часть кода не выполняется). Сам плеер скрыт CSS.
-    if SOUND_FILE.exists():
+    # Звук завершения. Играет один раз — только если обработка закончилась на наших глазах
+    # (при последующих перерисовках, например после «Скачать», звука нет). Плеер скрыт CSS.
+    if was_running and SOUND_FILE.exists():
         try:
             st.audio(str(SOUND_FILE), autoplay=True)
         except Exception:

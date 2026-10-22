@@ -140,11 +140,106 @@ def read_excel_fast(src, **kw) -> pd.DataFrame:
     )
 
 
+# ---------------------------------------------------------------------------
+# Ресурсы сервера: сколько процессов можно запускать
+# ---------------------------------------------------------------------------
+# Проблема: на облачном хостинге (контейнер/cgroup) os.cpu_count() возвращает число ядер ВСЕГО
+# физического сервера (десятки), а реально контейнеру доступна доля ядра и ограниченная память.
+# Запуск 8 процессов (каждый ~0,2-0,3 ГБ) там приводит к нехватке памяти и «throttle» (урезанию CPU),
+# и обработка обрывается. Поэтому смотрим на лимиты контейнера и подбираем число процессов под них.
+# На обычном компьютере (Windows/macOS/Linux без лимитов) поведение прежнее: min(ядер, 8).
+WORKER_MB = int(os.environ.get("OKTMO_WORKER_MB", "300"))     # память одного процесса-воркера
+RESERVE_MB = int(os.environ.get("OKTMO_RESERVE_MB", "1200"))  # запас главному процессу (файл, таблицы, Excel)
+
+
+def _read_text(path: str):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return None
+
+
+def parse_cpu_max(text):
+    """cgroup v2, файл cpu.max: 'max 100000' (без лимита) или '50000 100000' (= 0,5 ядра)."""
+    parts = (text or "").split()
+    if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit() and int(parts[1]) > 0:
+        return int(parts[0]) / int(parts[1])
+    return None
+
+
+def parse_cfs(quota_text, period_text):
+    """cgroup v1: cpu.cfs_quota_us / cpu.cfs_period_us (квота -1 = без лимита)."""
+    try:
+        q, per = int(quota_text), int(period_text)
+    except (TypeError, ValueError):
+        return None
+    return q / per if q > 0 and per > 0 else None
+
+
+def parse_mem_bytes(text):
+    """Значение лимита/использования памяти из cgroup; 'max' и «практически бесконечность» -> None."""
+    try:
+        v = int((text or "").strip())
+    except ValueError:
+        return None
+    return v if 0 < v < (1 << 60) else None
+
+
+def cpu_limit() -> int:
+    """Сколько ядер реально доступно: доступные процессу ядра и квота контейнера (cgroup)."""
+    n = os.cpu_count() or 1
+    try:
+        n = min(n, len(os.sched_getaffinity(0)))
+    except AttributeError:  # Windows/macOS
+        pass
+    for quota in (
+        parse_cpu_max(_read_text("/sys/fs/cgroup/cpu.max")),
+        parse_cfs(_read_text("/sys/fs/cgroup/cpu/cpu.cfs_quota_us"), _read_text("/sys/fs/cgroup/cpu/cpu.cfs_period_us")),
+    ):
+        if quota is not None:
+            n = min(n, max(1, int(quota)))
+    return max(1, n)
+
+
+def memory_budget_mb():
+    """Сколько МБ памяти ещё свободно для нас (с учётом лимита контейнера). None — не удалось определить."""
+    free = []
+    limit = parse_mem_bytes(_read_text("/sys/fs/cgroup/memory.max")) or parse_mem_bytes(
+        _read_text("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+    )
+    used = parse_mem_bytes(_read_text("/sys/fs/cgroup/memory.current")) or parse_mem_bytes(
+        _read_text("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+    )
+    if limit:
+        free.append((limit - (used or 0)) / 2**20)
+    meminfo = _read_text("/proc/meminfo")
+    if meminfo:
+        for line in meminfo.splitlines():
+            if line.startswith("MemAvailable:"):
+                free.append(int(line.split()[1]) / 1024)
+    return min(free) if free else None
+
+
 def default_workers() -> int:
+    """Число процессов: OKTMO_WORKERS, если задано; иначе min(ядра, 8), урезанное по памяти."""
     env = os.environ.get("OKTMO_WORKERS")
     if env and env.isdigit() and int(env) > 0:
         return int(env)
-    return max(1, min(os.cpu_count() or 1, 8))
+    n = min(cpu_limit(), 8)
+    budget = memory_budget_mb()
+    if budget is not None:
+        n = min(n, int((budget - RESERVE_MB) // WORKER_MB))
+    return max(1, n)
+
+
+def resource_summary() -> str:
+    """Строка для логов сервера: на какие ресурсы рассчитываем."""
+    b = memory_budget_mb()
+    return (
+        f"процессов={default_workers()}, ядер доступно={cpu_limit()}, "
+        f"свободной памяти={'?' if b is None else f'{b:.0f} МБ'}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +446,8 @@ class SharedPool:
 
     def close(self):
         if self._ex is not None:
-            self._ex.shutdown(wait=True)
+            # cancel_futures: при отмене задания не ждём все оставшиеся части этапа
+            self._ex.shutdown(wait=True, cancel_futures=True)
             self._ex = None
 
 
@@ -406,15 +502,24 @@ def run_parallel(func, items, workers, min_parallel, on_progress=None, initializ
             done += chunk_w[i]
             if on_progress:
                 on_progress(done, total_w)
-    except Exception as e:  # BrokenProcessPool и т.п. -> считаем в одном процессе
+    except Exception as e:  # BrokenProcessPool и т.п. (например, процесс убит из-за нехватки памяти)
         if pool is not None:
             pool.reset()
         if isinstance(e, (ValueError, KeyError, TypeError)):
             raise
-        return run_parallel(func, items, 1, min_parallel, on_progress, initializer, initargs, weights)
+        # Досчитываем в этом процессе только те части, которые ещё не готовы (готовые не пересчитываем,
+        # прогресс не откатывается назад). Раньше этап начинался заново — на сервере это очень долго.
+        if initializer:
+            initializer(*initargs)
+        for i, c in enumerate(chunks):
+            if results[i] is None:
+                results[i] = func(c)
+                done += chunk_w[i]
+                if on_progress:
+                    on_progress(done, total_w)
     finally:
         if own is not None:
-            own.shutdown(wait=True)
+            own.shutdown(wait=True, cancel_futures=True)
     return [r for part in results for r in part]
 
 
