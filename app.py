@@ -44,6 +44,46 @@ SOUND_FILE = BASE / "win-xp-sound.wav"
 ACCENT = "#2B60E2"        # основной синий
 ACCENT_HOVER = "#1F4FC4"  # чуть темнее — для кнопки при наведении мыши
 
+# >>> ДОБАВЛЕНО: бирюзовый цвет — названия и галочки завершённых этапов обработки
+TEAL = "#34B1AA"
+
+# >>> ДОБАВЛЕНО: цветные акценты карточек показателей (левая полоса и цифра)
+#   распознавание — зелёный #28a745; нераспознанные — нейтральный серо-синий;
+#   достоверность — бирюзовый; сомнительные — красный (как красная заливка НП в таблице)
+METRIC_COLORS = {
+    "recognition": "#28a745",  # >>> ИЗМЕНЕНО: был синий ACCENT
+    "unrecognized": "#8795AE",
+    "accuracy": TEAL,
+    "doubtful": "#E5484D",
+}
+
+# >>> ДОБАВЛЕНО: подсказки при наведении на значок «?» у карточек (поддерживают Markdown)
+METRIC_HELP = {
+    "recognition": (
+        "**Доля адресов, для которых найден населённый пункт** и проставлен код ОКТМО, "
+        "от общего числа строк.\n\n"
+        "Показывает, сколько адресов программа сумела обработать, но не гарантирует, что результат верный "
+        "— для этого есть «Уровень достоверности»."
+    ),
+    "unrecognized": (
+        "Адреса, для которых населённый пункт найти не удалось: ячейки «НП» и «ОКТМО» в файле "
+        "остаются пустыми.\n\n"
+        "Вместе с распознанными дают общее число строк."
+    ),
+    "accuracy": (
+        "**Доля адресов, где найденный населённый пункт действительно встречается в исходном адресе** "
+        "(зелёная заливка в колонке «НП»), от общего числа строк.\n\n"
+        "Чем выше, тем меньше результатов придётся проверять вручную. "
+    ),
+    "doubtful": (
+        "Код проставлен, но название найденного населённого пункта **не встречается в исходном адресе** "
+        "(красная заливка в колонке «НП»).\n\n"
+        "Часто результат всё равно верный — например, «Н. Ломов» → «Нижний Ломов», — "
+        "но такие строки лучше проверить. "
+        "Сомнительные = распознанные − достоверные."
+    ),
+}
+
 # Цвета заливки колонки «НП» в таблице предпросмотра (те же, что в Excel-файле):
 FILL_GREEN = "background-color: #92D050; color: #1f1f1f"  # НП найден в исходном адресе
 FILL_RED = "background-color: #FF0000; color: #ffffff"    # НП не найден в исходном адресе
@@ -128,6 +168,7 @@ p.sub {{text-align:center; color:#666; margin-bottom:1.6rem;}}
     width:100% !important;
     display:flex !important;
     justify-content:center !important;
+    margin: 20px 0;
 }}
 [data-testid="stDownloadButton"] {{
     display:flex; justify-content:center;
@@ -157,6 +198,52 @@ p.sub {{text-align:center; color:#666; margin-bottom:1.6rem;}}
     position:absolute !important; left:-9999px; width:1px; height:1px; overflow:hidden; opacity:0;
     margin:0 !important; pointer-events:none;
 }}
+
+/* ===== Карточки показателей ===== */
+/* >>> ДОБАВЛЕНО: каждая карточка — белая плитка с цветной полосой слева. Цвет задаётся переменной --accent,
+       которую выставляют контейнеры с ключами m_recognition / m_unrecognized / m_accuracy / m_doubtful. */
+.st-key-m_recognition {{ --accent:{METRIC_COLORS["recognition"]}; }}
+.st-key-m_unrecognized {{ --accent:{METRIC_COLORS["unrecognized"]}; }}
+.st-key-m_accuracy {{ --accent:{METRIC_COLORS["accuracy"]}; }}
+.st-key-m_doubtful {{ --accent:{METRIC_COLORS["doubtful"]}; }}
+.st-key-metrics [data-testid="stMetric"] {{
+    background:#fff; border:1px solid #E3E8F0; border-left:6px solid var(--accent, {ACCENT});
+    border-radius:12px; padding:1rem 1.2rem; box-shadow:0 1px 4px rgba(16,24,40,.06);
+}}
+/* >>> ИЗМЕНЕНО: плитки уже и дальше друг от друга. Ширина плитки ограничена (max-width), а сама плитка
+       центрируется в своей колонке (margin-inline:auto), поэтому свободное место превращается в промежутки.
+       Хотите уже/шире — меняйте только max-width (на узких экранах плитка просто займёт всю колонку). */
+.st-key-metrics [data-testid="stMetric"] {{ text-align:center; max-width:260px; margin-inline:auto; }}
+/* >>> ИЗМЕНЕНО: по центру карточки. Название и значок «?» Streamlit раскладывает в две колонки сетки
+       (auto 1fr), поэтому для центровки переключаем строку названия на flex. */
+.st-key-metrics [data-testid="stMetricLabel"] {{
+    display:flex !important; justify-content:center; align-items:center; gap:.4rem;
+    color:#5b6472; font-weight:600; text-align:center;
+}}
+.st-key-metrics [data-testid="stMetricValue"] {{
+    color:var(--accent, {ACCENT}); font-weight:800; text-align:center; justify-content:center;
+}}
+.st-key-metrics [data-testid="stMetricValue"] * {{ text-align:center; justify-content:center; }}
+
+/* ===== Этапы обработки ===== */
+/* >>> ДОБАВЛЕНО: ряд из пяти этапов под полосой прогресса. Завершённые — бирюзовая галочка и название,
+       текущий — пульсирующая точка и тёмное название, ожидающие — серые. */
+/* >>> ИЗМЕНЕНО: space-between — этапы равномерно распределяются по всей ширине (пустое место справа исчезает);
+       gap задаёт минимальный промежуток, когда этапы не помещаются в одну строку (узкий экран). */
+.stages {{ display:flex; flex-wrap:wrap; justify-content:space-between; gap:.7rem 2rem; margin:.4rem 0 1.2rem 0; }}
+.stage {{ display:flex; align-items:center; gap:.55rem; color:#9AA3B2; font-size:.97rem; }}
+.stage .mark {{
+    width:24px; height:24px; border-radius:50%; border:2px solid #C9D0DC; background:#fff;
+    display:inline-flex; align-items:center; justify-content:center; font-size:.85rem; font-weight:800; flex:none;
+}}
+.stage.done {{ color:{TEAL}; font-weight:600; }}
+.stage.done .mark {{ border-color:{TEAL}; color:{TEAL}; background:#E8F7F6; }}
+.stage.active {{ color:#1f1f1f; font-weight:700; }}
+.stage.active .mark {{ border-color:{TEAL}; }}
+.stage.active .mark::after {{
+    content:""; width:10px; height:10px; border-radius:50%; background:{TEAL}; animation:stagePulse 1.1s ease-in-out infinite;
+}}
+@keyframes stagePulse {{ 0%,100% {{ transform:scale(.55); opacity:.55; }} 50% {{ transform:scale(1); opacity:1; }} }}
 </style>
 <h1 class="hero">Простановка кодов ОКТМО</h1>
 <h2 class="hero">Справочник ОКТМО актуален на 01.01.2025</h2>
@@ -172,6 +259,25 @@ def fmt_time(sec: float) -> str:
     """Секунды -> '5 мин 47 с' или '12 с'."""
     sec = int(sec)
     return f"{sec // 60} мин {sec % 60} с" if sec >= 60 else f"{sec} с"
+
+
+def stages_html(active: int, all_done: bool = False) -> str:
+    """HTML ряда этапов обработки.
+
+    active   — номер текущего этапа (0..4), -1 — обработка ещё не началась (ждём очереди);
+    all_done — все этапы завершены (все с галочкой).
+    Этапы до текущего считаются завершёнными. Названия берутся из pipeline.STAGES.
+    """
+    items = []
+    for i, (_key, title, _weight) in enumerate(pipeline.STAGES):
+        if all_done or i < active:
+            cls, mark = "done", "✓"
+        elif i == active:
+            cls, mark = "active", ""  # внутри — пульсирующая точка (рисуется CSS)
+        else:
+            cls, mark = "", ""
+        items.append(f'<div class="stage {cls}"><span class="mark">{mark}</span><span>{title}</span></div>')
+    return f'<div class="stages">{"".join(items)}</div>'
 
 
 def styled_preview(res: pipeline.Result):
@@ -212,12 +318,20 @@ def show_result(res: pipeline.Result, out_name: str):
         width="content",
     )
 
-    # Четыре показателя в ряд
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Уровень распознавания", f"{s['recognition_level']:.2f}%")
-    c2.metric("Нераспознанных НП", f"{s['unrecognized']:,}".replace(",", " "))
-    c3.metric("Уровень достоверности", f"{s['accuracy_level']:.2f}%")
-    c4.metric("Возможно неверно распознанных НП", f"{s['incorrect']:,}".replace(",", " "))
+    # Четыре показателя в ряд — цветные карточки. Объяснение каждого — в подсказке (значок «?» у названия).
+    # Контейнеры с key= нужны, чтобы CSS мог покрасить каждую карточку в свой цвет (см. METRIC_COLORS).
+    with st.container(key="metrics"):
+        c1, c2, c3, c4 = st.columns(4, gap="medium")  # >>> ИЗМЕНЕНО: gap="medium" — больше базовый отступ между колонками
+        with c1.container(key="m_recognition"):
+            st.metric("Уровень распознавания", f"{s['recognition_level']:.2f}%", help=METRIC_HELP["recognition"])
+        with c2.container(key="m_unrecognized"):
+            st.metric("Нераспознанных НП", f"{s['unrecognized']:,}".replace(",", " "), help=METRIC_HELP["unrecognized"])
+        with c3.container(key="m_accuracy"):
+            st.metric("Уровень достоверности", f"{s['accuracy_level']:.2f}%", help=METRIC_HELP["accuracy"])
+        with c4.container(key="m_doubtful"):
+            st.metric("Сомнительных НП", f"{s['incorrect']:,}".replace(",", " "), help=METRIC_HELP["doubtful"])
+    
+    st.markdown("<div style='margin-top: 30px;'></div>", unsafe_allow_html=True)
 
     # Таблица первых 100 строк с цветной колонкой «НП»
     with st.expander("Предпросмотр результата (первые 100 строк)", expanded=True):
@@ -296,22 +410,33 @@ def main():
     if was_running:
         st.info(f"Файл «{uploaded.name}» загружен ({uploaded.size / 1024 / 1024:.1f} МБ). Идёт обработка…")
         bar = st.progress(0.0, text="Подготовка…")  # прогресс-бар (цвет — см. CSS)
+        # >>> ДОБАВЛЕНО: под полосой — пять этапов; завершённые отмечены бирюзовой галочкой.
+        stages_box = st.empty()
+        titles = [t for _k, t, _w in pipeline.STAGES]
+        shown = None  # какой набор этапов уже нарисован (перерисовываем только при смене этапа)
         while not job.done:
             if job.queued:
                 bar.progress(0.0, text="В очереди: сервер сейчас обрабатывает другой файл…")
+                active = -1
             else:
                 frac, stage, done, total = job.progress
+                active = titles.index(stage) if stage in titles else 0
                 elapsed = time.time() - (job.started or time.time())
                 # Оценка оставшегося времени по пройденной доле (показываем после первых 3%)
                 eta = f" • осталось ≈ {fmt_time(elapsed / frac * (1 - frac))}" if frac > 0.03 else ""
                 # Счётчик «обработано/всего» — только если этап считает строки
                 detail = f" ({done:,}/{total:,})".replace(",", " ") if total > 1 else ""
                 bar.progress(min(frac, 1.0), text=f"{stage}{detail} — {frac * 100:.0f}%{eta}")
+            if active != shown:
+                stages_box.markdown(stages_html(active), unsafe_allow_html=True)
+                shown = active
             time.sleep(0.4)
         if job.error:
             bar.empty()
+            stages_box.empty()
         else:
             bar.progress(1.0, text="Обработка завершена — 100%")
+            stages_box.markdown(stages_html(-1, all_done=True), unsafe_allow_html=True)  # все этапы с галочками
 
     # Итог: ошибка или результат
     if job.error:
