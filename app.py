@@ -116,11 +116,25 @@ ICON = (
 # ---------------------------------------------------------------------------
 CSS = f"""
 <style>
+/* ===== Чистый сплошной фон без клеточек ===== */
+.stApp {{
+    background-color: #F4F6F9;
+}}
+
 /* Прячем стандартное меню Streamlit и подвал */
 #MainMenu, footer {{visibility: hidden;}}
 
 /* Максимальная ширина содержимого страницы и отступ сверху */
-.block-container {{max-width: 1500px; padding-top: 2.5rem;}}
+/* >>> ИЗМЕНЕНО: контейнер страницы растянут на всю ширину окна (max-width:none), а колонка содержимого шириной
+       до 1500px получается боковыми отступами --side (на узких экранах --side = 1rem, как и было). Это нужно, чтобы футер
+       мог дотянуться до краёв окна: его отрицательные поля равны --side. Нижний отступ 0 — футер вплотную к низу. */
+.block-container {{
+    max-width: none !important;
+    --side: max(1rem, calc((100vw - 1500px) / 2));
+    padding: 2.5rem var(--side) 0 var(--side) !important;
+}}
+/* Блок содержимого не ниже окна: на коротких страницах (например, до загрузки файла) футер опускается к низу окна */
+.block-container > [data-testid="stVerticalBlock"] {{ min-height: calc(100vh - 2.5rem); }}
 
 /* Заголовок и подзаголовок по центру */
 h1.hero {{text-align:center; font-weight:800; font-size:2.6rem; color:#1f1f1f; margin:0 0 0 0;}}
@@ -130,7 +144,7 @@ p.sub {{text-align:center; color:#666; margin-bottom:1.6rem;}}
 /* ===== Синяя зона загрузки файла ===== */
 [data-testid="stFileUploader"] section,
 [data-testid="stFileUploaderDropzone"] {{
-    background:#0A3E85 !important;                         /* фон зоны */
+    background:#0A3E85 !important;                          /* фон зоны */
     border:2px dashed rgba(255,255,255,.85) !important;    /* белый пунктир внутри */
     outline:10px solid #1656B8; outline-offset:-1px;       /* широкая внешняя рамка */
     border-radius:10px;
@@ -148,7 +162,7 @@ p.sub {{text-align:center; color:#666; margin-bottom:1.6rem;}}
     content:"или перетащите файл .xlsx / .xls сюда"; color:#e0efff; font-size:1rem;
 }}
 /* Белая кнопка выбора файла с русской подписью.
-   Красим только stBaseButton-secondary, чтобы не задеть кнопки «удалить»/«добавить». */
+    Красим только stBaseButton-secondary, чтобы не задеть кнопки «удалить»/«добавить». */
 [data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"] {{
     order:2; background:#fff !important; color:#1f1f1f !important; border:none !important;
     font-size:0 !important;                 /* прячем исходную английскую подпись */
@@ -161,9 +175,7 @@ p.sub {{text-align:center; color:#666; margin-bottom:1.6rem;}}
 /* Кнопка «добавить ещё файл» не нужна: файл всегда один */
 [data-testid="stFileUploaderDropzone"] button[aria-label="Add files"] {{ display:none !important; }}
 
-/* ===== Кнопка «СКАЧАТЬ ОБРАБОТАННЫЙ ФАЙЛ» ===== */
-/* >>> ИЗМЕНЕНО (центрирование): контейнер кнопки растягиваем на всю ширину страницы
-       и выравниваем содержимое по центру. Саму кнопку при этом не растягиваем. */
+/* ===== Кнопка «СКАЧАТЬ ОБРАБОТАННЫЙ ФАЙЛ» (Парящая) ===== */
 .stElementContainer:has([data-testid="stDownloadButton"]) {{
     width:100% !important;
     display:flex !important;
@@ -173,35 +185,37 @@ p.sub {{text-align:center; color:#666; margin-bottom:1.6rem;}}
 [data-testid="stDownloadButton"] {{
     display:flex; justify-content:center;
 }}
-/* Размер кнопки: 300 x 60 px */
-/* >>> ИЗМЕНЕНО (цвет): фон и рамка кнопки — ACCENT (#2B60E2), белый текст.
-       !important нужен, чтобы перебить красный цвет из темы Streamlit. */
+/* Размер кнопки: 300 x 60 px, эффект парения (тень + анимация) */
 [data-testid="stDownloadButton"] button {{
     width:300px !important; height:60px !important; font-weight:700;
     background-color:{ACCENT} !important; border:1px solid {ACCENT} !important; color:#fff !important;
+    border-radius: 12px !important;
+    box-shadow: 0 6px 20px rgba(43, 96, 226, 0.35) !important;
+    transition: all 0.25s ease-in-out !important;
 }}
-/* Цвет кнопки при наведении и нажатии мыши — чуть темнее */
-[data-testid="stDownloadButton"] button:hover,
+/* Эффект при наведении: кнопка плавно приподнимается и тень становится объемнее */
+[data-testid="stDownloadButton"] button:hover {{
+    background-color:{ACCENT_HOVER} !important; border-color:{ACCENT_HOVER} !important; color:#fff !important;
+    transform: translateY(-3px) !important;
+    box-shadow: 0 10px 25px rgba(43, 96, 226, 0.5) !important;
+}}
 [data-testid="stDownloadButton"] button:active,
 [data-testid="stDownloadButton"] button:focus {{
     background-color:{ACCENT_HOVER} !important; border-color:{ACCENT_HOVER} !important; color:#fff !important;
+    transform: translateY(-1px) !important;
+    box-shadow: 0 4px 12px rgba(43, 96, 226, 0.4) !important;
 }}
 
 /* ===== Прогресс-бар ===== */
-/* >>> ИЗМЕНЕНО: заливка полосы (внутренний div внутри «дорожки» stProgressBarTrack) — ACCENT.
-       Раньше селектор целился в другие вложенные div и не срабатывал, поэтому полоса была красной. */
 [data-testid="stProgressBarTrack"] > div {{ background-color:{ACCENT} !important; }}
 
 /* ===== Звук завершения ===== */
-/* Плеер уводим за пределы экрана и делаем 1x1 px: звук играет сам, а самого плеера не видно */
 .stElementContainer:has([data-testid="stAudio"]), [data-testid="stAudio"] {{
     position:absolute !important; left:-9999px; width:1px; height:1px; overflow:hidden; opacity:0;
     margin:0 !important; pointer-events:none;
 }}
 
 /* ===== Карточки показателей ===== */
-/* >>> ДОБАВЛЕНО: каждая карточка — белая плитка с цветной полосой слева. Цвет задаётся переменной --accent,
-       которую выставляют контейнеры с ключами m_recognition / m_unrecognized / m_accuracy / m_doubtful. */
 .st-key-m_recognition {{ --accent:{METRIC_COLORS["recognition"]}; }}
 .st-key-m_unrecognized {{ --accent:{METRIC_COLORS["unrecognized"]}; }}
 .st-key-m_accuracy {{ --accent:{METRIC_COLORS["accuracy"]}; }}
@@ -209,13 +223,8 @@ p.sub {{text-align:center; color:#666; margin-bottom:1.6rem;}}
 .st-key-metrics [data-testid="stMetric"] {{
     background:#fff; border:1px solid #E3E8F0; border-left:6px solid var(--accent, {ACCENT});
     border-radius:12px; padding:1rem 1.2rem; box-shadow:0 1px 4px rgba(16,24,40,.06);
+    text-align:center; max-width:260px; margin-inline:auto;
 }}
-/* >>> ИЗМЕНЕНО: плитки уже и дальше друг от друга. Ширина плитки ограничена (max-width), а сама плитка
-       центрируется в своей колонке (margin-inline:auto), поэтому свободное место превращается в промежутки.
-       Хотите уже/шире — меняйте только max-width (на узких экранах плитка просто займёт всю колонку). */
-.st-key-metrics [data-testid="stMetric"] {{ text-align:center; max-width:260px; margin-inline:auto; }}
-/* >>> ИЗМЕНЕНО: по центру карточки. Название и значок «?» Streamlit раскладывает в две колонки сетки
-       (auto 1fr), поэтому для центровки переключаем строку названия на flex. */
 .st-key-metrics [data-testid="stMetricLabel"] {{
     display:flex !important; justify-content:center; align-items:center; gap:.4rem;
     color:#5b6472; font-weight:600; text-align:center;
@@ -226,10 +235,6 @@ p.sub {{text-align:center; color:#666; margin-bottom:1.6rem;}}
 .st-key-metrics [data-testid="stMetricValue"] * {{ text-align:center; justify-content:center; }}
 
 /* ===== Этапы обработки ===== */
-/* >>> ДОБАВЛЕНО: ряд из пяти этапов под полосой прогресса. Завершённые — бирюзовая галочка и название,
-       текущий — пульсирующая точка и тёмное название, ожидающие — серые. */
-/* >>> ИЗМЕНЕНО: space-between — этапы равномерно распределяются по всей ширине (пустое место справа исчезает);
-       gap задаёт минимальный промежуток, когда этапы не помещаются в одну строку (узкий экран). */
 .stages {{ display:flex; flex-wrap:wrap; justify-content:space-between; gap:.7rem 2rem; margin:.4rem 0 1.2rem 0; }}
 .stage {{ display:flex; align-items:center; gap:.55rem; color:#9AA3B2; font-size:.97rem; }}
 .stage .mark {{
@@ -244,6 +249,39 @@ p.sub {{text-align:center; color:#666; margin-bottom:1.6rem;}}
     content:""; width:10px; height:10px; border-radius:50%; background:{TEAL}; animation:stagePulse 1.1s ease-in-out infinite;
 }}
 @keyframes stagePulse {{ 0%,100% {{ transform:scale(.55); opacity:.55; }} 50% {{ transform:scale(1); opacity:1; }} }}
+
+/* ===== ФУТЕР ===== */
+/* >>> ИЗМЕНЕНО: футер больше не «приклеен» к окну. Он стоит в потоке страницы ПОСЛЕДНИМ элементом
+       (order:999), поэтому ничего не закрывает: при прокрутке появляется после всех данных.
+       Если данных мало, margin-top:auto прижимает его к низу окна (см. min-height у блока содержимого выше).
+       Во всю ширину окна растянут отрицательными полями, равными боковым отступам страницы (--side). */
+.stElementContainer:has(.footer) {{ order: 999; margin-top: auto; }}
+.footer {{
+    margin: 2rem calc(-1 * var(--side, 1rem)) 0 calc(-1 * var(--side, 1rem));
+    box-sizing: border-box;
+    background-color: #002b5d;
+    text-align: center;
+    padding: 14px 20px;
+    font-size: 15px;
+    color: #cbd5e1;
+    border-top: 1px solid #334155;
+    font-family: var(--font-text); font-variant-numeric: lining-nums tabular-nums;
+}}
+
+/* «Контакты» — раскрывающийся блок (<details>): по клику показывает текст, по повторному — скрывает.
+   Работает без JavaScript и без перезапуска страницы. */
+.footer details {{ margin: 0; }}
+.footer summary {{
+    display: inline-block; cursor: pointer; user-select: none; list-style: none;
+    color: #38bdf8; font-weight: 600; padding: 3px 12px; border-radius: 6px;
+    background: rgba(56, 189, 248, 0.15); border: 1px solid rgba(56, 189, 248, 0.4);
+    font-family: var(--font-ui);
+}}
+.footer summary::-webkit-details-marker {{ display: none; }}  /* прячем стандартный треугольник (Chrome/Safari) */
+.footer summary::after {{ content: " ▾"; }}                   /* ▾ — закрыто */
+.footer details[open] summary::after {{ content: " ▴"; }}      /* ▴ — открыто */
+.footer summary:hover {{ background: rgba(56, 189, 248, 0.28); }}
+.footer .contacts-text {{ margin-top: 10px; color: #e2e8f0; }}
 </style>
 <h1 class="hero">Простановка кодов ОКТМО</h1>
 <h2 class="hero">Справочник ОКТМО актуален на 01.01.2025</h2>
@@ -251,6 +289,15 @@ p.sub {{text-align:center; color:#666; margin-bottom:1.6rem;}}
 распознаны и дополнены субъектом, районом, населённым пунктом и кодом ОКТМО.</p>
 """
 
+# >>> ИЗМЕНЕНО: в футере остались только «Контакты» (<details>/<summary> — раскрывается по клику).
+# Текст контактов меняется здесь, в блоке contacts-text.
+# Строки внутри — без отступов в начале и без пустых строк: иначе Markdown примет их за блок кода.
+FOOTER_HTML = """<div class="footer">
+<details>
+<summary>Контакты 📞</summary>
+<div class="contacts-text">Селютин Егор Геннадьевич, Управление платежных систем и расчетов СГУ, 📞 ВТС (232)-1235, 📞 FMC 62-48-19</div>
+</details>
+</div>"""
 
 # ---------------------------------------------------------------------------
 # 3. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -347,8 +394,10 @@ def show_result(res: pipeline.Result, out_name: str):
 # 4. ГЛАВНАЯ ЛОГИКА СТРАНИЦЫ
 # ---------------------------------------------------------------------------
 def main():
-    st.set_page_config(page_title="Простановка кодов ОКТМО", page_icon="📍", layout="centered")
+    st.set_page_config(page_title="Простановка кодов ОКТМО", page_icon="favicon.svg", layout="centered")
     st.markdown(CSS, unsafe_allow_html=True)  # подключаем стили и выводим заголовок
+    # >>> ДОБАВЛЕНО: футер. Выводим сразу (до возможных st.stop() ниже); CSS ставит его последним элементом страницы.
+    st.markdown(FOOTER_HTML, unsafe_allow_html=True)
 
     # Справочник ОКТМО читается один раз и кэшируется (повторные загрузки файлов его не перечитывают).
     # mtime в аргументах: если вы замените файл справочника — кэш обновится сам.
