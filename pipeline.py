@@ -451,14 +451,19 @@ class SharedPool:
             self._ex = None
 
 
-def run_parallel(func, items, workers, min_parallel, on_progress=None, initializer=None, initargs=(), weights=None, pool=None):
+def run_parallel(func, items, workers, min_parallel, on_progress=None, initializer=None, initargs=(), weights=None, pool=None, stats=None):
     """Применяет func к чанкам items; возвращает плоский список результатов в исходном порядке.
 
     weights — сколько строк исходного файла соответствует каждому элементу (уникальному адресу);
     прогресс считается в строках файла, а не в уникальных значениях.
     pool — общий SharedPool; если не задан, пул создаётся и закрывается внутри вызова.
+    stats — необязательный словарь для замеров: mode (serial/parallel/fallback), n_items, n_chunks,
+            first_s — сколько секунд прошло до первого готового результата (в параллельном режиме сюда входит
+            запуск процессов и передача им справочника).
     """
     n = len(items)
+    if stats is not None:
+        stats.update(mode="empty" if n == 0 else "", n_items=n, n_chunks=0, first_s=None)
     if n == 0:
         return []
     if weights is None:
@@ -468,12 +473,21 @@ def run_parallel(func, items, workers, min_parallel, on_progress=None, initializ
     for w in weights:
         prefix.append(prefix[-1] + w)
 
+    t_begin = time.time()
+
+    def note_first():
+        if stats is not None and stats["first_s"] is None:
+            stats["first_s"] = time.time() - t_begin
+
     if workers <= 1 or n < min_parallel:
+        if stats is not None:
+            stats["mode"] = "serial"
         if initializer:
             initializer(*initargs)
         out, step = [], max(50, n // 100)
         for i in range(0, n, step):
             out.extend(func(items[i : i + step]))
+            note_first()
             if on_progress:
                 on_progress(prefix[min(i + step, n)], total_w)
         return out
@@ -482,6 +496,8 @@ def run_parallel(func, items, workers, min_parallel, on_progress=None, initializ
     starts = list(range(0, n, chunk))
     chunks = [items[i : i + chunk] for i in starts]
     chunk_w = [prefix[min(i + chunk, n)] - prefix[i] for i in starts]
+    if stats is not None:
+        stats.update(mode="parallel", n_chunks=len(chunks))
     results: list = [None] * len(chunks)
     done = 0
     own = None
@@ -499,6 +515,7 @@ def run_parallel(func, items, workers, min_parallel, on_progress=None, initializ
         for f in as_completed(futs):
             i = futs[f]
             results[i] = f.result()
+            note_first()
             done += chunk_w[i]
             if on_progress:
                 on_progress(done, total_w)
@@ -507,6 +524,8 @@ def run_parallel(func, items, workers, min_parallel, on_progress=None, initializ
             pool.reset()
         if isinstance(e, (ValueError, KeyError, TypeError)):
             raise
+        if stats is not None:
+            stats["mode"] = "fallback"
         # Досчитываем в этом процессе только те части, которые ещё не готовы (готовые не пересчитываем,
         # прогресс не откатывается назад). Раньше этап начинался заново — на сервере это очень долго.
         if initializer:
@@ -569,8 +588,9 @@ def compute_status(df: pd.DataFrame, src_col: str = COL_SRC):
 
 def build_xlsx(
     df: pd.DataFrame, status: np.ndarray, stats_rows: list[list], on_progress=None,
-    src_col: str = COL_SRC, clean_col: str = COL_CLEAN,
+    src_col: str = COL_SRC, clean_col: str = COL_CLEAN, timing: dict | None = None,
 ) -> bytes:
+    t_func = time.time()
     buf = io.BytesIO()
     # strings_to_*: False — не проверять каждую строку на «ссылку/формулу/число» (быстрее) и не превращать
     # адреса вида «http…», «=…» в гиперссылки/формулы (у Excel есть лимит ~65 тыс. гиперссылок)
@@ -608,6 +628,9 @@ def build_xlsx(
     n = len(df)
     st = status.tolist()
     step = max(1000, n // 50)
+    t_rows = time.time()
+    if timing is not None:
+        timing["write.prep"] = t_rows - t_func  # подготовка: списки значений, ширина колонок, заголовок
     for r, row in enumerate(zip(*data), start=1):
         ws.write_row(r, 0, row)
         s = st[r - 1]
@@ -618,6 +641,9 @@ def build_xlsx(
         if on_progress and r % step == 0:
             on_progress(r, n)
 
+    t_close = time.time()
+    if timing is not None:
+        timing["write.rows"] = t_close - t_rows  # запись строк (по этому участку идёт индикатор)
     ws2 = wb.add_worksheet("Статистика")
     widths = [0] * len(stats_rows[0])
     for r, row in enumerate(stats_rows):
@@ -627,7 +653,10 @@ def build_xlsx(
     for c, w in enumerate(widths):
         ws2.set_column(c, c, w + 2)
     wb.close()
-    return buf.getvalue()
+    out = buf.getvalue()
+    if timing is not None:
+        timing["write.close"] = time.time() - t_close  # лист «Статистика», сжатие и сборка файла (индикатор в это время стоит на ~100%)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -641,16 +670,39 @@ class Result:
     preview_status: np.ndarray  # 0 — без заливки, 1 — зелёная, 2 — красная (для первых 100 строк)
     elapsed: float
     timings: dict = field(default_factory=dict)
+    info: dict = field(default_factory=dict)  # условия замеров: строки, уникальные адреса, процессы, точки прогресса
 
 
 # (ключ, название, доля общего прогресса)
+# Веса здесь — для параллельного режима (workers >= 2). Калибровка на сервере, файл 343 627 строк
+# (почти все адреса уникальны), workers=2: итого 289 с — чтение 2,23; очистка 53,18; распознавание 195,72;
+# показатели 2,09; Excel 35,90 с.
+# Сумма весов = 1. Названия этапов используются и в интерфейсе (app.py).
 STAGES = [
-    ("read", "Чтение файла", 0.06),
-    ("clean", "Очистка и обогащение адресов", 0.34),
-    ("match", "Распознавание населённых пунктов", 0.40),
-    ("stats", "Расчёт показателей", 0.04),
-    ("write", "Формирование Excel-файла", 0.16),
+    ("read", "Чтение файла", 0.008),
+    ("clean", "Очистка и обогащение адресов", 0.184),
+    ("match", "Распознавание населённых пунктов", 0.677),
+    ("stats", "Расчёт показателей", 0.007),
+    ("write", "Формирование Excel-файла", 0.124),
 ]
+
+# Веса для однопроцессного режима (workers = 1): очистка и распознавание не ускоряются процессами,
+# поэтому их доля больше, а доля чтения/записи — меньше. Калибровка на сервере, тот же файл, workers=1:
+# итого 482 с — чтение 1,97; очистка 80,42; распознавание 362,30; показатели 1,85; Excel 35,58 с.
+STAGE_WEIGHTS_SERIAL = {
+    "read": 0.004,
+    "clean": 0.167,
+    "match": 0.751,
+    "stats": 0.004,
+    "write": 0.074,
+}
+
+
+def stage_weights(workers: int) -> dict:
+    """Веса этапов для заданного числа процессов (сумма = 1)."""
+    if workers <= 1:
+        return dict(STAGE_WEIGHTS_SERIAL)
+    return {k: w for k, _, w in STAGES}
 
 
 def run_pipeline(file_obj, index: OktmoIndex, progress=None, workers: int | None = None) -> Result:
@@ -670,21 +722,44 @@ def run_pipeline(file_obj, index: OktmoIndex, progress=None, workers: int | None
 def _run_pipeline(file_obj, index: OktmoIndex, progress, workers: int, pool) -> Result:
     t0 = time.time()
     timings: dict = {}
-    base = {k: sum(s[2] for s in STAGES[:i]) for i, (k, _, _) in enumerate(STAGES)}
-    weight = {k: w for k, _, w in STAGES}
+    weight = stage_weights(workers)
+    base, _acc = {}, 0.0
+    for _k, _t, _w in STAGES:
+        base[_k] = _acc
+        _acc += weight[_k]
     title = {k: t for k, t, _ in STAGES}
 
+    stage_t0: dict = {}  # когда начался каждый этап
+    marks: dict = {}     # "clean@50" -> сколько секунд от начала этапа прошло до 50% его прогресса
+    info: dict = {
+        "workers": workers, "cpus": cpu_limit(), "parallel": pool is not None, "marks": marks,
+        "weights": weight,
+    }
+
     def report(key, done, total):
+        f = done / total if total else 1.0
+        t_stage = stage_t0.get(key)
+        if t_stage is not None:
+            for m in (25, 50, 75):
+                if f >= m / 100 and f"{key}@{m}" not in marks:
+                    marks[f"{key}@{m}"] = time.time() - t_stage
         if progress:
-            frac = base[key] + weight[key] * (done / total if total else 1)
+            frac = base[key] + weight[key] * f
             progress(min(frac, 1.0), title[key], done, total)
 
     def stage_cb(key):
         return lambda d, t: report(key, d, t)
 
     # 1. Чтение
-    report("read", 0, 1)
+    try:  # размер файла в байтах (для замеров)
+        file_obj.seek(0, 2)
+        info["file_bytes"] = file_obj.tell()
+        file_obj.seek(0)
+    except Exception:
+        info["file_bytes"] = None
     ts = time.time()
+    stage_t0["read"] = ts
+    report("read", 0, 1)
     df = read_excel_fast(file_obj)
     # Ищем колонку с адресами: «Местонахождение», «Адрес» или любая, содержащая «Адрес»
     src_col, clean_col = find_address_column(df.columns)
@@ -702,34 +777,52 @@ def _run_pipeline(file_obj, index: OktmoIndex, progress, workers: int, pool) -> 
 
     # 2. Очистка (только уникальные адреса)
     ts = time.time()
+    stage_t0["clean"] = ts
     uniq = src.unique().tolist()
     w_clean = src.value_counts().reindex(uniq).tolist()  # строк файла на каждый уникальный адрес
+    t_run = time.time()
+    timings["clean.pre"] = t_run - ts  # уникальные адреса и их веса
+    clean_stats: dict = {}
     cleaned = run_parallel(
-        _clean_chunk, uniq, workers, MIN_PARALLEL_CLEAN, stage_cb("clean"), weights=w_clean, pool=pool
+        _clean_chunk, uniq, workers, MIN_PARALLEL_CLEAN, stage_cb("clean"), weights=w_clean, pool=pool,
+        stats=clean_stats,
     )
+    t_post = time.time()
+    timings["clean.run"] = t_post - t_run  # собственно очистка (в параллельном режиме — вместе с запуском процессов)
     df[clean_col] = src.map(dict(zip(uniq, cleaned)))
+    timings["clean.post"] = time.time() - t_post  # раскладка результата по всем строкам файла
     timings["clean"] = time.time() - ts
+    info["clean_run"] = clean_stats
     report("clean", 1, 1)
 
     # 3. Распознавание (только уникальные очищенные адреса, отсортированные для локальности кэша)
     ts = time.time()
+    stage_t0["match"] = ts
     uniq_c = sorted(df[clean_col].unique().tolist())
     w_match = df[clean_col].value_counts().reindex(uniq_c).tolist()
+    t_run = time.time()
+    timings["match.pre"] = t_run - ts
+    match_stats: dict = {}
     matched = run_parallel(
         _match_chunk, uniq_c, workers, MIN_PARALLEL_MATCH, stage_cb("match"),
-        initializer=_init_matcher, initargs=(index,), weights=w_match, pool=pool,
+        initializer=_init_matcher, initargs=(index,), weights=w_match, pool=pool, stats=match_stats,
     )
+    t_post = time.time()
+    timings["match.run"] = t_post - t_run
     mp_ = dict(zip(uniq_c, matched))
     empty = ("", "", "", "")
     res = df[clean_col].map(lambda a: mp_.get(a) or empty)
     out = pd.DataFrame(res.tolist(), columns=OUT_COLS, index=df.index)
     for c in OUT_COLS:
         df[c] = out[c]
+    timings["match.post"] = time.time() - t_post
     timings["match"] = time.time() - ts
+    info["match_run"] = match_stats
     report("match", 1, 1)
 
     # 4. Метрики
     ts = time.time()
+    stage_t0["stats"] = ts
     recognized, correct, status = compute_status(df, src_col)
     total = len(df)
     rec_n, cor_n = int(recognized.sum()), int(correct.sum())
@@ -760,16 +853,59 @@ def _run_pipeline(file_obj, index: OktmoIndex, progress, workers: int, pool) -> 
 
     # 5. Excel
     ts = time.time()
+    stage_t0["write"] = ts
     preview = df.head(100).copy()
     preview_status = status[:100].copy()
     report("write", 0, 1)
-    xlsx = build_xlsx(df, status, stats_rows, stage_cb("write"), src_col=src_col, clean_col=clean_col)
+    xlsx = build_xlsx(df, status, stats_rows, stage_cb("write"), src_col=src_col, clean_col=clean_col, timing=timings)
     timings["write"] = time.time() - ts
     report("write", 1, 1)
 
     elapsed = time.time() - t0
     stats["elapsed"] = elapsed
+    info.update(rows=total, unique_raw=len(uniq), unique_clean=len(uniq_c))
     return Result(
         xlsx=xlsx, stats=stats, preview=preview, preview_status=preview_status,
-        elapsed=elapsed, timings=timings,
+        elapsed=elapsed, timings=timings, info=info,
     )
+
+
+# ---------------------------------------------------------------------------
+# Отчёт о замерах (для калибровки весов этапов и оценки оставшегося времени)
+# ---------------------------------------------------------------------------
+def timing_report(res: Result):
+    """Замеры одного запуска.
+
+    Возвращает (rows, header, values):
+      rows   — таблица для экрана: (этап, секунд, фактическая доля %, текущий вес в коде %);
+      header — названия столбцов через табуляцию, values — значения через табуляцию
+               (две строки удобно вставлять в Excel и присылать для расчёта новых весов).
+    """
+    t, info = res.timings, res.info
+    used_w = info.get("weights") or {k: w for k, _, w in STAGES}  # веса, применённые в этом запуске
+    stage_sum = sum(t.get(k, 0.0) for k, _, _ in STAGES) or 1e-9
+    rows = [(title, t.get(k, 0.0), t.get(k, 0.0) / stage_sum * 100, used_w.get(k, 0.0) * 100) for k, title, _ in STAGES]
+
+    cr, mr = info.get("clean_run") or {}, info.get("match_run") or {}
+    fb = info.get("file_bytes")
+    cols = [
+        ("rows", info.get("rows")), ("unique_raw", info.get("unique_raw")), ("unique_clean", info.get("unique_clean")),
+        ("workers", info.get("workers")), ("cpus", info.get("cpus")),
+        ("file_mb", None if fb is None else fb / 1e6),
+    ]
+    cols += [(k, t.get(k)) for k, _, _ in STAGES] + [("total", res.elapsed)]
+    cols += [(k, t.get(k)) for k in (
+        "clean.pre", "clean.run", "clean.post", "match.pre", "match.run", "match.post",
+        "write.prep", "write.rows", "write.close",
+    )]
+    cols += [("clean_mode", cr.get("mode")), ("clean_first_s", cr.get("first_s")),
+             ("match_mode", mr.get("mode")), ("match_first_s", mr.get("first_s"))]
+    marks = info.get("marks") or {}
+    cols += [(f"{k}@{m}", marks.get(f"{k}@{m}")) for k in ("clean", "match", "write") for m in (25, 50, 75)]
+
+    def fmt(v):
+        if v is None:
+            return ""
+        return f"{v:.2f}" if isinstance(v, float) else str(v)
+
+    return rows, "\t".join(k for k, _ in cols), "\t".join(fmt(v) for _, v in cols)
