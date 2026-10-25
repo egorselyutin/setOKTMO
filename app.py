@@ -14,7 +14,6 @@ import io
 import multiprocessing as mp
 import os
 import time
-from datetime import datetime
 from pathlib import Path
 
 # Дочерние процессы (spawn) заново импортируют этот файл как «__mp_main__». Интерфейс им не нужен,
@@ -38,14 +37,6 @@ BASE = Path(__file__).parent  # папка, где лежит app.py
 OKTMO_FILE = Path(os.environ.get("OKTMO_FILE", BASE / "НП_ОКТМО_01012025.xlsx"))
 # Звук завершения. Если файла нет — просто тишина, ошибки не будет.
 SOUND_FILE = BASE / "win-xp-sound.wav"
-
-# >>> ДОБАВЛЕНО: замеры времени этапов (нужны, чтобы откалибровать веса этапов в pipeline.STAGES).
-#     SHOW_TIMINGS     — показывать под результатом таблицу «Замеры времени этапов» и строку для копирования;
-#     LOG_TIMINGS_FILE — дописывать строку замеров в файл timings_log.tsv рядом с app.py (по строке на запуск).
-#     В консоль/логи сервера строка замеров выводится всегда. Закончив калибровку, поставьте оба флага False.
-SHOW_TIMINGS = False
-LOG_TIMINGS_FILE = False
-TIMINGS_LOG = BASE / "timings_log.tsv"
 
 # >>> ИЗМЕНЕНО: единый акцентный цвет сайта (насыщенный синий).
 #     Им красятся кнопка «СКАЧАТЬ ОБРАБОТАННЫЙ ФАЙЛ» и заливка прогресс-бара.
@@ -134,16 +125,7 @@ CSS = f"""
 #MainMenu, footer {{visibility: hidden;}}
 
 /* Максимальная ширина содержимого страницы и отступ сверху */
-/* >>> ИЗМЕНЕНО: контейнер страницы растянут на всю ширину окна (max-width:none), а колонка содержимого шириной
-       до 1500px получается боковыми отступами --side (на узких экранах --side = 1rem, как и было). Это нужно, чтобы футер
-       мог дотянуться до краёв окна: его отрицательные поля равны --side. Нижний отступ 0 — футер вплотную к низу. */
-.block-container {{
-    max-width: none !important;
-    --side: max(1rem, calc((100vw - 1500px) / 2));
-    padding: 2.5rem var(--side) 0 var(--side) !important;
-}}
-/* Блок содержимого не ниже окна: на коротких страницах (например, до загрузки файла) футер опускается к низу окна */
-.block-container > [data-testid="stVerticalBlock"] {{ min-height: calc(100vh - 2.5rem); }}
+.block-container {{max-width: 1500px; padding-top: 2.5rem;}}
 
 /* Заголовок и подзаголовок по центру */
 h1.hero {{text-align:center; font-weight:800; font-size:2.6rem; color:#1f1f1f; margin:0 0 0 0;}}
@@ -231,7 +213,7 @@ p.sub {{text-align:center; color:#666; margin-bottom:1.6rem;}}
 .st-key-m_doubtful {{ --accent:{METRIC_COLORS["doubtful"]}; }}
 .st-key-metrics [data-testid="stMetric"] {{
     background:#fff; border:1px solid #E3E8F0; border-left:6px solid var(--accent, {ACCENT});
-    border-radius:12px; padding:1rem 1.2rem; box-shadow:0 6px 20px rgba(16,24,40,.25);
+    border-radius:12px; padding:1rem 1.2rem; box-shadow:0 1px 4px rgba(16,24,40,.06);
     text-align:center; max-width:260px; margin-inline:auto;
 }}
 .st-key-metrics [data-testid="stMetricLabel"] {{
@@ -258,55 +240,12 @@ p.sub {{text-align:center; color:#666; margin-bottom:1.6rem;}}
     content:""; width:10px; height:10px; border-radius:50%; background:{TEAL}; animation:stagePulse 1.1s ease-in-out infinite;
 }}
 @keyframes stagePulse {{ 0%,100% {{ transform:scale(.55); opacity:.55; }} 50% {{ transform:scale(1); opacity:1; }} }}
-
-/* ===== ФУТЕР ===== */
-/* >>> ИЗМЕНЕНО: футер больше не «приклеен» к окну. Он стоит в потоке страницы ПОСЛЕДНИМ элементом
-       (order:999), поэтому ничего не закрывает: при прокрутке появляется после всех данных.
-       Если данных мало, margin-top:auto прижимает его к низу окна (см. min-height у блока содержимого выше).
-       Во всю ширину окна растянут отрицательными полями, равными боковым отступам страницы (--side). */
-.stElementContainer:has(.footer) {{ order: 999; margin-top: auto; }}
-.footer {{
-    margin: 2rem calc(-1 * var(--side, 1rem)) 0 calc(-1 * var(--side, 1rem));
-    box-sizing: border-box;
-    background-color: #002b5d;
-    text-align: center;
-    padding: 14px 20px;
-    font-size: 15px;
-    color: #cbd5e1;
-    border-top: 1px solid #334155;
-    font-family: var(--font-text); font-variant-numeric: lining-nums tabular-nums;
-}}
-
-/* «Контакты» — раскрывающийся блок (<details>): по клику показывает текст, по повторному — скрывает.
-   Работает без JavaScript и без перезапуска страницы. */
-.footer details {{ margin: 0; }}
-.footer summary {{
-    display: inline-block; cursor: pointer; user-select: none; list-style: none;
-    color: #38bdf8; font-weight: 600; padding: 3px 12px; border-radius: 6px;
-    background: rgba(56, 189, 248, 0.15); border: 1px solid rgba(56, 189, 248, 0.4);
-    font-family: var(--font-ui);
-}}
-.footer summary::-webkit-details-marker {{ display: none; }}  /* прячем стандартный треугольник (Chrome/Safari) */
-.footer summary::after {{ content: " ▾"; }}                   /* ▾ — закрыто */
-.footer details[open] summary::after {{ content: " ▴"; }}      /* ▴ — открыто */
-.footer summary:hover {{ background: rgba(56, 189, 248, 0.28); }}
-.footer .contacts-text {{ margin-top: 10px; color: #e2e8f0; }}
 </style>
 <h1 class="hero">Простановка кодов ОКТМО</h1>
 <h2 class="hero">Справочник ОКТМО актуален на 01.01.2025</h2>
 <p class="sub">Загрузите Excel-файл (.xlsx или .xls) с колонкой адресов («Местонахождение», «Адрес» или любой заголовок со словом «Адрес») — адреса будут очищены,
 распознаны и дополнены субъектом, районом, населённым пунктом и кодом ОКТМО.</p>
 """
-
-# >>> ИЗМЕНЕНО: в футере остались только «Контакты» (<details>/<summary> — раскрывается по клику).
-# Текст контактов меняется здесь, в блоке contacts-text.
-# Строки внутри — без отступов в начале и без пустых строк: иначе Markdown примет их за блок кода.
-FOOTER_HTML = """<div class="footer">
-<details>
-<summary>Контакты 📞</summary>
-<div class="contacts-text">Селютин Егор Геннадьевич, Управление платежных систем и расчетов СГУ, 📞 ВТС (232)-1235, 📞 FMC 62-48-19</div>
-</details>
-</div>"""
 
 # ---------------------------------------------------------------------------
 # 3. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -315,40 +254,6 @@ def fmt_time(sec: float) -> str:
     """Секунды -> '5 мин 47 с' или '12 с'."""
     sec = int(sec)
     return f"{sec // 60} мин {sec % 60} с" if sec >= 60 else f"{sec} с"
-
-
-def log_timings(name: str, res) -> None:
-    """Выводит замеры запуска в логи сервера и (если включено) дописывает их в timings_log.tsv."""
-    try:
-        _rows, header, values = pipeline.timing_report(res)
-        print(
-            f"[oktmo] замеры «{name}»: " + ", ".join(f"{h}={v}" for h, v in zip(header.split("\t"), values.split("\t")) if v != ""),
-            flush=True,
-        )
-        if LOG_TIMINGS_FILE:
-            new_file = not TIMINGS_LOG.exists() or TIMINGS_LOG.stat().st_size == 0
-            with TIMINGS_LOG.open("a", encoding="utf-8") as f:
-                if new_file:
-                    f.write("time\tfile\t" + header + "\n")
-                f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}\t{name}\t{values}\n")
-    except Exception as e:  # замеры не должны ломать обработку
-        print(f"[oktmo] не удалось записать замеры: {e}", flush=True)
-
-
-def show_timings(res: pipeline.Result):
-    """Таблица «фактическая доля этапа / вес в коде» и строка для копирования."""
-    rows, header, values = pipeline.timing_report(res)
-    with st.expander("Замеры времени этапов (для калибровки индикатора)"):
-        df_t = pd.DataFrame(rows, columns=["Этап", "Секунд", "Фактическая доля, %", "Вес в коде, %"])
-        st.dataframe(
-            df_t.style.format({"Секунд": "{:.2f}", "Фактическая доля, %": "{:.1f}", "Вес в коде, %": "{:.0f}"}),
-            width="stretch", hide_index=True,
-        )
-        st.caption(
-            "Скопируйте блок ниже (первая строка — названия столбцов, вторая — значения) и пришлите: "
-            "по нему пересчитываются веса этапов. Те же строки пишутся в логи сервера и в timings_log.tsv."
-        )
-        st.code(header + "\n" + values, language=None)
 
 
 def stages_html(active: int, all_done: bool = False) -> str:
@@ -432,9 +337,6 @@ def show_result(res: pipeline.Result, out_name: str):
             "Тот же цвет — в скачанном файле. Показатели также на листе «Статистика»."
         )
 
-    if SHOW_TIMINGS:
-        show_timings(res)
-
 
 # ---------------------------------------------------------------------------
 # 4. ГЛАВНАЯ ЛОГИКА СТРАНИЦЫ
@@ -442,8 +344,6 @@ def show_result(res: pipeline.Result, out_name: str):
 def main():
     st.set_page_config(page_title="Простановка кодов ОКТМО", page_icon="favicon.svg", layout="centered")
     st.markdown(CSS, unsafe_allow_html=True)  # подключаем стили и выводим заголовок
-    # >>> ДОБАВЛЕНО: футер. Выводим сразу (до возможных st.stop() ниже); CSS ставит его последним элементом страницы.
-    st.markdown(FOOTER_HTML, unsafe_allow_html=True)
 
     # Справочник ОКТМО читается один раз и кэшируется (повторные загрузки файлов его не перечитывают).
     # mtime в аргументах: если вы замените файл справочника — кэш обновится сам.
@@ -492,12 +392,8 @@ def main():
             st.stop()
         data = uploaded.getvalue()  # байты файла: поток не должен обращаться к объектам Streamlit
 
-        file_name = uploaded.name  # имя берём заранее: поток не должен обращаться к объектам Streamlit
-
         def target(j):
-            res = pipeline.run_pipeline(io.BytesIO(data), index, progress=j.report)
-            log_timings(file_name, res)  # замеры этапов -> логи сервера (и timings_log.tsv)
-            return res
+            return pipeline.run_pipeline(io.BytesIO(data), index, progress=j.report)
 
         # Строка в логах сервера («Manage app» -> Logs): помогает понять, чем ограничен сервер
         print(f"[oktmo] старт: «{uploaded.name}», {uploaded.size / 1e6:.1f} МБ; {pipeline.resource_summary()}", flush=True)
