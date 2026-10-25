@@ -43,8 +43,8 @@ SOUND_FILE = BASE / "win-xp-sound.wav"
 #     SHOW_TIMINGS     — показывать под результатом таблицу «Замеры времени этапов» и строку для копирования;
 #     LOG_TIMINGS_FILE — дописывать строку замеров в файл timings_log.tsv рядом с app.py (по строке на запуск).
 #     В консоль/логи сервера строка замеров выводится всегда. Закончив калибровку, поставьте оба флага False.
-SHOW_TIMINGS = True
-LOG_TIMINGS_FILE = True
+SHOW_TIMINGS = False
+LOG_TIMINGS_FILE = False
 TIMINGS_LOG = BASE / "timings_log.tsv"
 
 # >>> ИЗМЕНЕНО: единый акцентный цвет сайта (насыщенный синий).

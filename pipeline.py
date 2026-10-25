@@ -674,13 +674,35 @@ class Result:
 
 
 # (ключ, название, доля общего прогресса)
+# Веса здесь — для параллельного режима (workers >= 2). Калибровка на сервере, файл 343 627 строк
+# (почти все адреса уникальны), workers=2: итого 289 с — чтение 2,23; очистка 53,18; распознавание 195,72;
+# показатели 2,09; Excel 35,90 с.
+# Сумма весов = 1. Названия этапов используются и в интерфейсе (app.py).
 STAGES = [
-    ("read", "Чтение файла", 0.06),
-    ("clean", "Очистка и обогащение адресов", 0.34),
-    ("match", "Распознавание населённых пунктов", 0.40),
-    ("stats", "Расчёт показателей", 0.04),
-    ("write", "Формирование Excel-файла", 0.16),
+    ("read", "Чтение файла", 0.008),
+    ("clean", "Очистка и обогащение адресов", 0.184),
+    ("match", "Распознавание населённых пунктов", 0.677),
+    ("stats", "Расчёт показателей", 0.007),
+    ("write", "Формирование Excel-файла", 0.124),
 ]
+
+# Веса для однопроцессного режима (workers = 1): очистка и распознавание не ускоряются процессами,
+# поэтому их доля больше, а доля чтения/записи — меньше. Калибровка на сервере, тот же файл, workers=1:
+# итого 482 с — чтение 1,97; очистка 80,42; распознавание 362,30; показатели 1,85; Excel 35,58 с.
+STAGE_WEIGHTS_SERIAL = {
+    "read": 0.004,
+    "clean": 0.167,
+    "match": 0.751,
+    "stats": 0.004,
+    "write": 0.074,
+}
+
+
+def stage_weights(workers: int) -> dict:
+    """Веса этапов для заданного числа процессов (сумма = 1)."""
+    if workers <= 1:
+        return dict(STAGE_WEIGHTS_SERIAL)
+    return {k: w for k, _, w in STAGES}
 
 
 def run_pipeline(file_obj, index: OktmoIndex, progress=None, workers: int | None = None) -> Result:
@@ -700,13 +722,19 @@ def run_pipeline(file_obj, index: OktmoIndex, progress=None, workers: int | None
 def _run_pipeline(file_obj, index: OktmoIndex, progress, workers: int, pool) -> Result:
     t0 = time.time()
     timings: dict = {}
-    base = {k: sum(s[2] for s in STAGES[:i]) for i, (k, _, _) in enumerate(STAGES)}
-    weight = {k: w for k, _, w in STAGES}
+    weight = stage_weights(workers)
+    base, _acc = {}, 0.0
+    for _k, _t, _w in STAGES:
+        base[_k] = _acc
+        _acc += weight[_k]
     title = {k: t for k, t, _ in STAGES}
 
     stage_t0: dict = {}  # когда начался каждый этап
     marks: dict = {}     # "clean@50" -> сколько секунд от начала этапа прошло до 50% его прогресса
-    info: dict = {"workers": workers, "cpus": cpu_limit(), "parallel": pool is not None, "marks": marks}
+    info: dict = {
+        "workers": workers, "cpus": cpu_limit(), "parallel": pool is not None, "marks": marks,
+        "weights": weight,
+    }
 
     def report(key, done, total):
         f = done / total if total else 1.0
@@ -854,8 +882,9 @@ def timing_report(res: Result):
                (две строки удобно вставлять в Excel и присылать для расчёта новых весов).
     """
     t, info = res.timings, res.info
+    used_w = info.get("weights") or {k: w for k, _, w in STAGES}  # веса, применённые в этом запуске
     stage_sum = sum(t.get(k, 0.0) for k, _, _ in STAGES) or 1e-9
-    rows = [(title, t.get(k, 0.0), t.get(k, 0.0) / stage_sum * 100, w * 100) for k, title, w in STAGES]
+    rows = [(title, t.get(k, 0.0), t.get(k, 0.0) / stage_sum * 100, used_w.get(k, 0.0) * 100) for k, title, _ in STAGES]
 
     cr, mr = info.get("clean_run") or {}, info.get("match_run") or {}
     fb = info.get("file_bytes")
