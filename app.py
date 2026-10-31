@@ -35,7 +35,7 @@ if not _IS_CHILD:
 # ---------------------------------------------------------------------------
 BASE = Path(__file__).parent  # папка, где лежит app.py
 # Справочник НП/ОКТМО. Путь можно переопределить переменной окружения OKTMO_FILE.
-OKTMO_FILE = Path(os.environ.get("OKTMO_FILE", BASE / "НП_ОКТМО_01012025.xlsx"))
+OKTMO_FILE = Path(os.environ.get("OKTMO_FILE", BASE / "НП_ОКТМО_01012026.xlsx"))
 # Звук завершения. Если файла нет — просто тишина, ошибки не будет.
 SOUND_FILE = BASE / "win-xp-sound.wav"
 
@@ -229,11 +229,23 @@ p.sub {{text-align:center; color:#666; margin-bottom:1.6rem;}}
 .st-key-m_unrecognized {{ --accent:{METRIC_COLORS["unrecognized"]}; }}
 .st-key-m_accuracy {{ --accent:{METRIC_COLORS["accuracy"]}; }}
 .st-key-m_doubtful {{ --accent:{METRIC_COLORS["doubtful"]}; }}
-.st-key-metrics [data-testid="stMetric"] {{
+/* >>> ИЗМЕНЕНО: «карточкой» теперь служит весь контейнер (а не только st.metric), чтобы внутри поместилась строка
+       с абсолютными числами под значением (.metric-sub). Раньше рамка и тень были у [data-testid="stMetric"]. */
+.st-key-m_recognition, .st-key-m_unrecognized, .st-key-m_accuracy, .st-key-m_doubtful {{
     background:#fff; border:1px solid #E3E8F0; border-left:6px solid var(--accent, {ACCENT});
-    border-radius:12px; padding:1rem 1.2rem; box-shadow:0 6px 20px rgba(16,24,40,.25);
-    text-align:center; max-width:260px; margin-inline:auto;
+    border-radius:12px; padding:.5rem 1.2rem !important; height:112px; box-sizing:border-box; justify-content:center; box-shadow:0 6px 20px rgba(16,24,40,.25);
+    text-align:center; max-width:260px; margin-inline:auto; gap:0 !important;
 }}
+.st-key-metrics [data-testid="stMetric"] {{ text-align:center; padding:0; gap:0 !important; }}
+.st-key-metrics [data-testid="stMetricLabel"] {{ line-height:1.2; min-height:0; }}
+.st-key-metrics [data-testid="stMetricValue"] {{ font-size:2.1rem; line-height:1.1; font-variant-numeric: lining-nums tabular-nums; }}
+/* Абсолютные числа под значением: «79 из 98» */
+.metric-sub {{
+    color:#64748B; font-size:.9rem; font-weight:600; text-align:center;
+    font-variant-numeric: lining-nums tabular-nums; letter-spacing:.01em; line-height:1.2; margin:.15rem 0 0 0;
+}}
+/* Подпись выше от нижнего края: убираем нижний отступ у контейнера markdown внутри карточки */
+.st-key-metrics [data-testid="stMarkdownContainer"] {{ margin-bottom:0 !important; }}
 .st-key-metrics [data-testid="stMetricLabel"] {{
     display:flex !important; justify-content:center; align-items:center; gap:.4rem;
     color:#5b6472; font-weight:600; text-align:center;
@@ -293,7 +305,7 @@ p.sub {{text-align:center; color:#666; margin-bottom:1.6rem;}}
 .footer .contacts-text {{ margin-top: 10px; color: #e2e8f0; }}
 </style>
 <h1 class="hero">Простановка кодов ОКТМО</h1>
-<h2 class="hero">Справочник ОКТМО актуален на 01.01.2025</h2>
+<h2 class="hero">Справочник ОКТМО актуален на 01.10.2026</h2>
 <p class="sub">Загрузите Excel-файл (.xlsx или .xls) с колонкой адресов («Местонахождение», «Адрес» или любой заголовок со словом «Адрес») — адреса будут очищены,
 распознаны и дополнены субъектом, районом, населённым пунктом и кодом ОКТМО.</p>
 """
@@ -387,6 +399,11 @@ def styled_preview(res: pipeline.Result):
     return df.style.apply(paint, subset=["НП"])
 
 
+def metric_sub(text: str) -> None:
+    """Строка с абсолютными числами под значением карточки («79 из 98»)."""
+    st.markdown(f'<div class="metric-sub">{text}</div>', unsafe_allow_html=True)
+
+
 def show_result(res: pipeline.Result, out_name: str):
     """Выводит итог: сообщение, кнопку скачивания, показатели и таблицу предпросмотра."""
     s = res.stats
@@ -410,17 +427,24 @@ def show_result(res: pipeline.Result, out_name: str):
 
     # Четыре показателя в ряд — цветные карточки. Объяснение каждого — в подсказке (значок «?» у названия).
     # Контейнеры с key= нужны, чтобы CSS мог покрасить каждую карточку в свой цвет (см. METRIC_COLORS).
+    def n(v: int) -> str:  # 12345 -> «12 345»
+        return f"{v:,}".replace(",", " ")
+
     with st.container(key="metrics"):
         c1, c2, c3, c4 = st.columns(4, gap="medium")  # >>> ИЗМЕНЕНО: gap="medium" — больше базовый отступ между колонками
         with c1.container(key="m_recognition"):
             st.metric("Уровень распознавания", f"{s['recognition_level']:.2f}%", help=METRIC_HELP["recognition"])
+            metric_sub(f"{n(s['recognized'])} из {n(s['total'])}")
         with c2.container(key="m_unrecognized"):
-            st.metric("Нераспознанных НП", f"{s['unrecognized']:,}".replace(",", " "), help=METRIC_HELP["unrecognized"])
+            st.metric("Нераспознанных НП", n(s['unrecognized']), help=METRIC_HELP["unrecognized"])
+            metric_sub(f"из {n(s['total'])} адресов")
         with c3.container(key="m_accuracy"):
             st.metric("Уровень достоверности", f"{s['accuracy_level']:.2f}%", help=METRIC_HELP["accuracy"])
+            metric_sub(f"{n(s['correct'])} из {n(s['total'])}")
         with c4.container(key="m_doubtful"):
-            st.metric("Сомнительных НП", f"{s['incorrect']:,}".replace(",", " "), help=METRIC_HELP["doubtful"])
-    
+            st.metric("Сомнительных НП", n(s['incorrect']), help=METRIC_HELP["doubtful"])
+            metric_sub(f"из {n(s['recognized'])} распознанных")
+
     st.markdown("<div style='margin-top: 30px;'></div>", unsafe_allow_html=True)
 
     # Таблица первых 100 строк с цветной колонкой «НП»

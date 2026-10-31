@@ -52,6 +52,9 @@ class ReplacementTable(list):
     def __init__(self, items):
         super().__init__(items)
         keys = [item[1] for item in self]
+        # Ключи, начинающиеся с односимвольного типа («г Воскресенск, г», «г.о. Троицкий,»), нельзя искать
+        # внутри слова: иначе «округ Воскресенск, город» превращается в «окруВоскресенск, город».
+        self.left_bound = [needs_left_boundary(k) for k in keys]
         freq = {}
         for k in keys:
             for g in {k[i : i + _ANCHOR] for i in range(len(k) - _ANCHOR + 1)}:
@@ -82,6 +85,23 @@ class ReplacementTable(list):
         return found
 
 
+_RE_SINGLE_TYPE = re.compile(r"^[а-яёa-z][ .]")
+
+
+def needs_left_boundary(key_lower):
+    """Ключ вида «г Воскресенск…», «д.Орешки…», «г.о.…»: первая буква — самостоятельный тип, а не конец слова."""
+    return len(key_lower) > 2 and _RE_SINGLE_TYPE.match(key_lower) is not None
+
+
+def _find_key(text, key, start, need_left):
+    """str.find, но при need_left пропускает вхождения внутри слова (перед ключом стоит буква)."""
+    idx = text.find(key, start)
+    if need_left:
+        while idx > 0 and text[idx - 1].isalpha():
+            idx = text.find(key, idx + 1)
+    return idx
+
+
 def prepare_replacements(replacements):
     return ReplacementTable(
         [(old, old.lower(), new, new.lower(), len(old)) for old, new in replacements]
@@ -95,10 +115,12 @@ def _replace_ignore_case_fast(address, table):
     heap = list(queued)
     heapq.heapify(heap)
     items = table
+    left = table.left_bound
     while heap:
         i = heapq.heappop(heap)
         old, old_lower, new, new_lower, n_old = items[i]
-        idx = lower_address.find(old_lower)
+        need_left = left[i]
+        idx = _find_key(lower_address, old_lower, 0, need_left)
         if idx == -1:
             continue
         len_new = len(new)
@@ -108,7 +130,7 @@ def _replace_ignore_case_fast(address, table):
             address = address[:idx] + new + address[idx + n_old :]
             lower_address = lower_address[:idx] + new_lower + lower_address[idx + n_old :]
             touched.append(idx)
-            idx = lower_address.find(old_lower, idx + len_new)
+            idx = _find_key(lower_address, old_lower, idx + len_new, need_left)
         # Текст изменился: новые ключи-кандидаты могут появиться только рядом с вставленным
         # фрагментом (с запасом в 2 символа с каждой стороны для «пограничных» фрагментов).
         for pos in touched:
@@ -125,14 +147,15 @@ def replace_ignore_case_prepared(address, prepared):
         return _replace_ignore_case_fast(address, prepared)
     lower_address = address.lower()
     for old, old_lower, new, new_lower, n_old in prepared:
-        idx = lower_address.find(old_lower)
+        need_left = needs_left_boundary(old_lower)
+        idx = _find_key(lower_address, old_lower, 0, need_left)
         if idx == -1:
             continue
         len_new = len(new)
         while idx != -1:
             address = address[:idx] + new + address[idx + n_old :]
             lower_address = lower_address[:idx] + new_lower + lower_address[idx + n_old :]
-            idx = lower_address.find(old_lower, idx + len_new)
+            idx = _find_key(lower_address, old_lower, idx + len_new, need_left)
     return address
 
 

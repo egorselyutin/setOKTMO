@@ -68,6 +68,10 @@ def find_address_column(columns):
 OUT_COLS = ["Субъект", "Район", "НП", "ОКТМО"]
 EXCEL_MAX_ROWS = 1_048_575  # 1 строка занята заголовком
 
+# Режим структурного поиска: "0" (по умолчанию) — только если основной поиск ничего не нашёл;
+# "1" — при уверенном совпадении он главнее основного (исправляет и случаи, когда нечёткий поиск выбрал не тот НП).
+STRUCT_FIRST = os.environ.get("OKTMO_STRUCT_FIRST", "0") == "1"
+
 # Порог, ниже которого параллельный запуск не окупается (запуск процессов ~1-3 с)
 MIN_PARALLEL_CLEAN = 4000
 MIN_PARALLEL_MATCH = 400
@@ -254,11 +258,21 @@ def normalize_text(text) -> str:
 
 
 def _fmt_oktmo(v) -> str:
+    """Код ОКТМО строкой с лидирующими нулями (8 или 11 цифр).
+
+    Если справочник прочитан правильно (колонка как текст), значение приходит строкой и не меняется.
+    Страховка на случай, когда код всё же превратился в число (старый файл, другой движок чтения):
+    возвращаем нули — 8 цифр для муниципальных образований, 11 для населённых пунктов."""
     if v is None or (isinstance(v, float) and v != v):
         return ""
     if isinstance(v, float) and v.is_integer():
-        return str(int(v))
-    return str(v)
+        v = int(v)
+    s = str(v).strip()
+    if s.endswith(".0") and s[:-2].isdigit():
+        s = s[:-2]
+    if s.isdigit() and len(s) not in (8, 11):
+        s = s.zfill(8 if len(s) < 8 else 11)
+    return s
 
 
 class OktmoIndex:
@@ -312,8 +326,18 @@ class OktmoIndex:
         self.subject_index: dict[str, list[str]] = {k: list(dict.fromkeys(v)) for k, v in sub.items()}
 
 
+def _index_getstate(self):
+    st = dict(self.__dict__)
+    st.pop("_fb_cache", None)  # запасной индекс строится заново в каждом процессе, не передаём его по каналу
+    return st
+
+
+OktmoIndex.__getstate__ = _index_getstate
+
+
 def load_oktmo_index(path) -> OktmoIndex:
-    return OktmoIndex(read_excel_fast(path))
+    # dtype=str для ОКТМО: иначе pandas превращает текст «01701000001» в число 1701000001 и теряет ведущие нули
+    return OktmoIndex(read_excel_fast(path, dtype={COL_OKTMO_REF: str}))
 
 
 _SPECIAL = (
@@ -345,6 +369,7 @@ class Matcher:
         self.threshold = threshold
         self._pool_cache: dict[str, str | None] = {}
         self._variants: dict[tuple, list[str]] = {}
+        self._fb: _Fallback | None = None
 
     def _pool_key(self, subject_norm: str):
         """Ключ пула кандидатов (None = весь справочник). Повторяет цепочку из recognizer.py."""
@@ -361,6 +386,15 @@ class Matcher:
         self._pool_cache[subject_norm] = key
         return key
 
+    def _fallback(self, norm: str):
+        if self._fb is None:
+            self._fb = getattr(self.ix, "_fb_cache", None) or _Fallback(self.ix)
+            try:
+                self.ix._fb_cache = self._fb  # в главном процессе индекс живёт долго — строим один раз
+            except Exception:
+                pass
+        return self._fb.find(norm)
+
     def match(self, address: str):
         norm = normalize_text(address)
         if not norm:
@@ -373,6 +407,11 @@ class Matcher:
         hit = ix.lookup.get(norm)
         if hit is not None:
             return hit
+
+        if STRUCT_FIRST:
+            row, sure = self._fallback(norm)
+            if row is not None and sure:
+                return row
 
         city = _extract_city(norm)
         subject_norm = normalize_text(norm.split(",")[0].strip()) if norm else ""
@@ -397,7 +436,335 @@ class Matcher:
             res = process.extractOne(norm, pool, scorer=fuzz.token_set_ratio, score_cutoff=self.threshold)
             if res:
                 return ix.lookup[res[0]]
-        return None
+        return self._fallback(norm)[0]  # основной поиск ничего не нашёл — пробуем структурный
+
+
+
+# ---------------------------------------------------------------------------
+# Запасной структурный поиск
+# ---------------------------------------------------------------------------
+# Срабатывает ТОЛЬКО когда основной поиск (нечёткое сравнение всей строки) ничего не нашёл, поэтому уже
+# найденные результаты он не меняет. Идея: разобрать адрес на части (субъект, район, населённый пункт с типом),
+# найти НП в справочнике по точному названию внутри субъекта (ё = е, без типа «г/п/с/д…»), а похожие НП
+# разных районов различить по названию района. Если вариантов несколько и отличить их нечем — не гадаем.
+_NONALNUM = re.compile(r"[^а-яa-z0-9]+")
+_BRACKETS = re.compile(r"\([^)]*\)|/[^/]*/")
+_RE_GO = re.compile(r"\bг\s*\.\s*о\b\.?")
+_RE_MR = re.compile(r"\bм\s*\.\s*р\s*-?\s*н\b\.?")
+_RE_MO = re.compile(r"\bм\s*\.\s*о\b\.?")
+_RE_SS = re.compile(r"\bс\s*/\s*с\b")
+_RE_SP = re.compile(r"\bс\s*\.\s*п\b\.?")
+_RE_GPT = re.compile(r"\bг\s*\.\s*п\b\.?|\bг\s+п\b\.?")
+
+# Слова-типы населённых пунктов (как в начале/конце названия: «г Пермь», «Южный рп», «поселок городского типа Карабаш»)
+_NP_TYPES = frozenset(
+    "г город гор пгт рп п пос поселок посел городок дп с село д дер деревня х хутор ст станица ца аул аал "
+    "нп сл слобода кордон свх совхоз совхоза городского типа рабочий дачный курортный".split()
+)
+_NAME_DROP = _NP_TYPES | {"им", "имени", "при", "станции", "станция", "разъезда", "разъезд", "железнодорожной", "железнодорожного", "железнодорожный", "железнодорожная"}
+# Слова, по которым часть адреса считается названием района/муниципального образования, а не НП
+_DIST_WORDS = frozenset(
+    "район района округ округа сельсовет волость поселение межселенные муниципальный муниципального "
+    "внутригородской внутригородская внутригородское образование".split()
+)
+_STOP_WORDS = frozenset("ул улица пер переулок пр проспект ш шоссе тер территория км дом стр строение кв литера лит корп".split())
+_CITY_T = frozenset({"г", "город", "гор"})
+_TYPE_CLASS = {}
+for _cls, _ws in (
+    ("city", "г город гор"),
+    ("urban", "пгт рп п пос поселок посел городок дп"),
+    ("village", "с село ст станица ца аул аал сл слобода"),
+    ("hamlet", "д дер деревня х хутор нп свх совхоз совхоза"),
+):
+    for _w in _ws.split():
+        _TYPE_CLASS[_w] = _cls
+
+
+def _fold(s) -> str:
+    """Нижний регистр, ё -> е, всё кроме букв и цифр -> пробел."""
+    return _NONALNUM.sub(" ", str(s).lower().replace("ё", "е")).strip()
+
+
+def _fold_series(s: pd.Series) -> list:
+    return (
+        s.fillna("").astype(str).str.lower().str.replace("ё", "е", regex=False)
+        .str.replace(r"[^а-яa-z0-9]+", " ", regex=True).str.strip().tolist()
+    )
+
+
+def _core(tokens) -> str:
+    return " ".join(t for t in tokens if t not in _NAME_DROP)
+
+
+def _stem_eq(a: str, b: str) -> bool:
+    """Слова совпадают с точностью до окончания («Воскресенск» ~ «Воскресенский», «Пермь» ~ «Пермский»),
+    но «Красноглинский» и «Красноярский» — разные."""
+    if a == b:
+        return True
+    n = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        n += 1
+    return n >= max(4, min(len(a), len(b)) - 3)
+
+
+class _Fallback:
+    """Индексы справочника для структурного поиска. Строятся лениво (один раз на процесс)."""
+
+    def __init__(self, ix: "OktmoIndex"):
+        keys = ix.keys
+        rows = [ix.lookup[k] for k in keys]
+        self.rows = rows
+        subj = _fold_series(pd.Series([r[0] for r in rows], dtype=object))
+        dist = _fold_series(pd.Series([r[1] for r in rows], dtype=object))
+        npf = _fold_series(pd.Series([r[2] for r in rows], dtype=object))
+        self.subj_names = {}  # свёрнутое название субъекта -> оно же (для проверки принадлежности)
+        self.dist_tok = []
+        self.np_type = []
+        self.by_core = defaultdict(list)    # (субъект, ядро названия НП) -> [номера строк]
+        self.by_subj = defaultdict(list)    # субъект -> [номера строк]
+        self.core_of = []
+        for i, (sf, df_, nf) in enumerate(zip(subj, dist, npf)):
+            toks = nf.split()
+            core = _core(toks)
+            self.subj_names[sf] = True
+            self.core_of.append(core)
+            self.np_type.append(frozenset(t for t in toks if t in _NP_TYPES))
+            self.dist_tok.append(tuple(t for t in df_.split() if len(t) >= 3 and t not in _DIST_WORDS))
+            if core:
+                self.by_core[(sf, core)].append(i)
+            self.by_subj[sf].append(i)
+        self.subj_of = subj
+        self._subj_cores: dict = {}
+
+    # --- разбор адреса ----------------------------------------------------
+    @staticmethod
+    def _segments(address: str):
+        out = []
+        for seg in address.split(","):
+            s = seg.lower()
+            s = _RE_GO.sub(" городской округ ", s)
+            s = _RE_MR.sub(" муниципальный район ", s)
+            s = _RE_MO.sub(" муниципальный округ ", s)
+            s = _RE_SS.sub(" сельсовет ", s)
+            s = _RE_SP.sub(" сельское поселение ", s)
+            s = _RE_GPT.sub(" городское поселение ", s)
+            s = _BRACKETS.sub(" ", s)
+            out.append(_fold(s).split())
+        return out
+
+    def _subject(self, segs):
+        found = None
+        for i, toks in enumerate(segs[:4]):
+            if toks and " ".join(toks) in self.subj_names:
+                found = (i, " ".join(toks))  # берём последний (вложенный: «Тюменская…, Ханты-Мансийский…»)
+        return found
+
+    @staticmethod
+    def _name_tokens(toks):
+        """Обрезает название на цифрах и «улично-домовых» словах."""
+        out = []
+        for t in toks:
+            if t in _STOP_WORDS or any(c.isdigit() for c in t):
+                break
+            out.append(t)
+        return out
+
+    def _candidates(self, segs, subj_idx):
+        """[(сила, номер части, ядро, типы, можно_обрезать)]; сила: 0 — с явным типом, 1 — «гп …», 2 — без типа."""
+        cands = []
+        for i, toks in enumerate(segs):
+            if i == subj_idx or not toks:
+                continue
+            if any(t in _DIST_WORDS for t in toks):
+                continue  # район/округ — подсказка, не НП
+            lead = 0
+            while lead < len(toks) and (toks[lead] in _NP_TYPES or toks[lead] == "гп"):
+                lead += 1
+            if lead:
+                types = frozenset(toks[:lead]) & _NP_TYPES
+                name = self._name_tokens(toks[lead:])
+                weak = toks[0] == "гп"
+                core = _core(name)
+                if core and len(name[0]) > 1:
+                    cands.append((1 if weak else 0, i, core, types, weak))
+                continue
+            tail = 0
+            while tail < len(toks) and toks[-1 - tail] in _NP_TYPES:
+                tail += 1
+            if tail:  # «Южный рп», «Киров г»
+                core = _core(self._name_tokens(toks[: len(toks) - tail]))
+                if core:
+                    cands.append((0, i, core, frozenset(toks[len(toks) - tail:]) & _NP_TYPES, False))
+                continue
+            mid = [k for k, t in enumerate(toks) if t in _NP_TYPES and 0 < k]
+            if mid:  # «Управленческий п Гипсовый карьер»
+                k = mid[0]
+                core = _core(self._name_tokens(toks[:k]))
+                if core:
+                    cands.append((0, i, core, frozenset({toks[k]}), False))
+                continue
+            name = self._name_tokens(toks)
+            core = _core(name)
+            if core and len(name) == len(toks):
+                cands.append((2, i, core, frozenset({"г"}), False))
+        return cands
+
+    # --- выбор строки справочника ----------------------------------------
+    def _score(self, row, hints, qtypes):
+        rt = self.dist_tok[row]
+        sc = sum(1 for h in hints if any(_stem_eq(h, r) for r in rt))
+        qc = {_TYPE_CLASS.get(t) for t in qtypes}
+        tb = 1 if qc & {_TYPE_CLASS.get(t) for t in self.np_type[row]} else 0
+        return (sc, tb)
+
+    def _choose(self, rows, hints, qtypes):
+        """(лучшая строка, число совпавших подсказок о районе); строка None, если лучших несколько."""
+        if len(rows) == 1:
+            return rows[0], self._score(rows[0], hints, qtypes)[0]
+        scored = sorted(((self._score(r, hints, qtypes), r) for r in rows), reverse=True)
+        if scored[0][0] == scored[1][0]:
+            return None, 0
+        return scored[0][1], scored[0][0][0]
+
+    def _fuzzy_rows(self, subj, core):
+        cores = self._subj_cores.get(subj)
+        if cores is None:
+            idx = self.by_subj.get(subj, [])
+            cores = ([self.core_of[i] for i in idx], idx)
+            self._subj_cores[subj] = cores
+        names, idx = cores
+        res = process.extract(core, names, scorer=fuzz.ratio, score_cutoff=88, limit=8)
+        qt = [t for t in core.split() if len(t) >= 4]
+        rows = []
+        for _name, _sc, pos in res:
+            rt = self.core_of[idx[pos]].split()
+            if all(any(_stem_eq(q, r) for r in rt) for q in qt):
+                rows.append(idx[pos])
+        return rows
+
+    def _subset_rows(self, subj, core, hints):
+        """Строки, в названии НП которых есть все слова запроса целиком («Лащи» -> «железнодорожный разъезд Лащи»).
+        Берём только подтверждённые названием района — иначе слишком много случайных совпадений."""
+        cores = self._subj_cores.get(subj)
+        if cores is None:
+            idx = self.by_subj.get(subj, [])
+            cores = ([self.core_of[i] for i in idx], idx)
+            self._subj_cores[subj] = cores
+        names, idx = cores
+        q = set(core.split())
+        out = []
+        for _n, _sc, pos in process.extract(core, names, scorer=fuzz.token_set_ratio, score_cutoff=100, limit=30):
+            row = idx[pos]
+            if q <= set(self.core_of[row].split()) and any(
+                _stem_eq(h, d) for h in hints for d in self.dist_tok[row]
+            ):
+                out.append(row)
+        return out
+
+    def _district_stem_rows(self, subj, core, dist_hints):
+        """Строки субъекта в названном районе, где каждое слово запроса совпадает со словом названия НП с точностью до окончания."""
+        q = [t for t in core.split() if len(t) >= 4]
+        if not q:
+            return []
+        out = []
+        for i in self.by_subj.get(subj, ()):
+            if not any(_stem_eq(h, d) for h in dist_hints for d in self.dist_tok[i]):
+                continue
+            rt = self.core_of[i].split()
+            if rt and all(any(_stem_eq(x, r) for r in rt) for x in q):
+                out.append(i)
+        return out
+
+    def find(self, address: str):
+        """(строка справочника | None, уверенно). «Уверенно» — НП с явным типом найден по точному названию
+        и выбран однозначно (без нечёткого сравнения и без отката к более крупному НП)."""
+        segs = self._segments(address)
+        sj = self._subject(segs)
+        if sj is None:
+            return None, False
+        first_strong = True
+        subj_idx, subj = sj
+        cands = sorted(self._candidates(segs, subj_idx), key=lambda c: (c[0], -c[1]))
+
+        def hints_for(i):
+            return [
+                t for k, toks in enumerate(segs) if k not in (i, subj_idx)
+                for t in toks if len(t) >= 3 and t not in _DIST_WORDS and t not in _NAME_DROP
+            ]
+
+        def resolve(core, types, strength, trim):
+            """(строка, совпало подсказок, точное ли имя, имя целиком) | 'ambiguous' | None."""
+            variants = [core]
+            if trim:  # «гп Рощинский Военторг»: название муниципалитета + лишнее слово
+                parts = core.split()
+                variants += [" ".join(parts[:n]) for n in range(len(parts) - 1, 0, -1)]
+            for v in variants:
+                rows = self.by_core.get((subj, v))
+                exact = bool(rows)
+                if not rows and strength == 0 and not (types & _CITY_T) and len(v) >= 4:
+                    rows = self._fuzzy_rows(subj, v)
+                    if not rows:  # слова запроса целиком внутри названия + район подтверждён — считаем надёжным
+                        rows = self._subset_rows(subj, v, hints_for_cur[0])
+                        exact = bool(rows)
+                if rows:
+                    pick, dscore = self._choose(rows, hints_for_cur[0], types)
+                    if pick is None:
+                        return "ambiguous"
+                    if dscore == 0 and explicit_dist[0]:
+                        # район назван в адресе прямо, а найденный НП лежит в другом: ищем в названном районе
+                        # НП с тем же названием с точностью до окончания («Нагорское» ~ «Нагорск»)
+                        alt = self._district_stem_rows(subj, v, explicit_dist[0])
+                        if len(alt) == 1:
+                            return alt[0], 1, False, v == core
+                    return pick, dscore, exact, v == core
+            return None
+
+        hints_for_cur = [None]
+        explicit_dist = [[
+            t for toks in segs if any(w in _DIST_WORDS for w in toks)
+            for t in toks if len(t) >= 3 and t not in _DIST_WORDS and t not in _NAME_DROP
+        ]]
+        # 1) НП с явным типом: собираем все найденные и берём самый конкретный
+        resolved = []
+        fails = 0
+        for strength, i, core, types, trim in cands:
+            if strength != 0:
+                break
+            hints_for_cur[0] = hints_for(i)
+            r = resolve(core, types, 0, False)
+            if r == "ambiguous":
+                if not resolved:
+                    return None, False  # самый конкретный НП не отличить от двойников — не гадаем
+                continue
+            if r is None:
+                fails += 1
+                continue
+            resolved.append((r, core, fails))
+        if resolved:
+            def inside(x):  # сколько других найденных НП названы в районе этого НП (значит, он внутри них)
+                rt = self.dist_tok[x[0][0]]
+                return sum(
+                    1 for y in resolved if y is not x
+                    and any(_stem_eq(t, d) for t in y[1].split() for d in rt)
+                )
+            best = max(resolved, key=lambda x: (inside(x), -resolved.index(x)))
+            (pick, dscore, exact, whole), core, nfail = best
+            return self.rows[pick], bool(exact and whole and nfail == 0)
+
+        # 2) «гп …» и названия без типа — по одному, от конца адреса
+        for strength, i, core, types, trim in cands:
+            if strength == 0:
+                continue
+            hints_for_cur[0] = hints_for(i)
+            r = resolve(core, types, strength, trim)
+            if r == "ambiguous":
+                return None, False
+            if r is not None:
+                pick, dscore, exact, whole = r
+                return self.rows[pick], bool(exact and whole and fails == 0 and strength == 2 and dscore >= 1)
+        return None, False
 
 
 # --- функции для процессов -------------------------------------------------

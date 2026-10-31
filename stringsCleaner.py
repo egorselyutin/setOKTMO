@@ -81,6 +81,29 @@ _RE_ZIP3 = re.compile(r"\b\d{3},\s*")
 _RE_QUOTE = re.compile(r'^"\s*')
 _RE_SPACES = re.compile(r"\s{2,}")
 
+# Города федерального значения. Торцевое удаление улиц (remover) отрезает всё после первого «улично-домового» слова,
+# и если адрес записан «задом наперёд» («…улица Щепкина, дом 4, Москва, Российская Федерация»), город пропадает.
+_FEDERAL_CITIES = {
+    "москва": "Москва",
+    "санкт-петербург": "Санкт-Петербург",
+    "севастополь": "Севастополь",
+    "байконур": "Байконур",
+}
+_RE_CITY_PREFIX = re.compile(r"^(?:г\.?|город)\s+")
+
+
+def _keep_federal_city(before, after):
+    """Если торцевое удаление «съело» город федерального значения, стоявший отдельной частью адреса, возвращаем его."""
+    if len(after) >= len(before):
+        return after
+    low_after = after.lower()
+    for part in before.split(","):
+        name = _RE_CITY_PREFIX.sub("", part.strip().lower())
+        city = _FEDERAL_CITIES.get(name)
+        if city is not None and name not in low_after:
+            return (after + ", г " + city) if after else ("г " + city)
+    return after
+
 
 def process_address(address):
     """Очистка и обогащение одного адреса."""
@@ -121,7 +144,9 @@ def process_address(address):
     address = _RE_SPACES.sub(" ", address).strip()
 
     # Торцевое удаление (улицы, дома и т.п.)
+    before_cut = address
     address = remove_street_info(address)
+    address = _keep_federal_city(before_cut, address)
 
     # "область Амурская" -> "Амурская область"
     address = apply_order_to_region(address)
