@@ -62,7 +62,7 @@ METRIC_COLORS = {
 METRIC_HELP = {
     "recognition": (
         "**Доля адресов, для которых найден населённый пункт** и проставлен код ОКТМО, "
-        "от общего числа строк.\n\n"
+        "от числа строк с заполненным адресом (пустые строки не считаются).\n\n"
         "Показывает, сколько адресов программа сумела обработать, но не гарантирует, что результат верный "
         "— для этого есть «Уровень достоверности»."
     ),
@@ -73,7 +73,7 @@ METRIC_HELP = {
     ),
     "accuracy": (
         "**Доля адресов, где найденный населённый пункт действительно встречается в исходном адресе** "
-        "(зелёная заливка в колонке «НП»), от общего числа строк.\n\n"
+        "(зелёная заливка в колонке «НП»), от числа **распознанных** строк.\n\n"
         "Чем выше, тем меньше результатов придётся проверять вручную. "
     ),
     "doubtful": (
@@ -406,6 +406,8 @@ def show_result(res: pipeline.Result, out_name: str):
     st.caption(
         f"Адреса взяты из колонки «{s['address_column']}»; "
         f"очищенные адреса записаны в колонку «{s['clean_column']}»."
+        + (f" Строк с пустым адресом не учтено: {s['total_rows'] - s['total']:,}.".replace(",", " ")
+           if s.get("total_rows", s["total"]) > s["total"] else "")
     )
 
     # Кнопка скачивания. Её цвет и размер задаёт CSS выше; расположение по центру — тоже CSS.
@@ -434,7 +436,7 @@ def show_result(res: pipeline.Result, out_name: str):
             metric_sub(f"из {n(s['total'])} адресов")
         with c3.container(key="m_accuracy"):
             st.metric("Уровень достоверности", f"{s['accuracy_level']:.2f}%", help=METRIC_HELP["accuracy"])
-            metric_sub(f"{n(s['correct'])} из {n(s['total'])}")
+            metric_sub(f"{n(s['correct'])} из {n(s['recognized'])}")
         with c4.container(key="m_doubtful"):
             st.metric("Сомнительных НП", n(s['incorrect']), help=METRIC_HELP["doubtful"])
             metric_sub(f"из {n(s['recognized'])} распознанных")

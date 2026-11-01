@@ -1191,12 +1191,17 @@ def _run_pipeline(file_obj, index: OktmoIndex, progress, workers: int, pool) -> 
     ts = time.time()
     stage_t0["stats"] = ts
     recognized, correct, status = compute_status(df, src_col)
-    total = len(df)
-    rec_n, cor_n = int(recognized.sum()), int(correct.sum())
+    n_rows = len(df)
+    # В «обработанные» попадают только строки с непустым адресом (пустые и состоящие из одних пробелов не считаем)
+    nonblank = (src.str.strip() != "").to_numpy()
+    total = int(nonblank.sum())
+    rec_n = int((recognized & nonblank).sum())
+    cor_n = int((correct & nonblank).sum())
     rec_lvl = rec_n / total * 100 if total else 0
-    acc_lvl = cor_n / total * 100 if total else 0
+    acc_lvl = cor_n / rec_n * 100 if rec_n else 0  # достоверность — доля от РАСПОЗНАННЫХ, а не от всех строк
     stats = {
         "total": total,
+        "total_rows": n_rows,
         "recognized": rec_n,
         "unrecognized": total - rec_n,
         "correct": cor_n,
@@ -1214,6 +1219,7 @@ def _run_pipeline(file_obj, index: OktmoIndex, progress, workers: int, pool) -> 
         ["Нераспознанных НП", total - rec_n],
         ["Уровень достоверности (%)", f"{acc_lvl:.2f}"],
         ["Возможно неверно распознанных НП", rec_n - cor_n],
+        ["Строк с адресом", total],
     ]
     timings["stats"] = time.time() - ts
     report("stats", 1, 1)
@@ -1230,7 +1236,7 @@ def _run_pipeline(file_obj, index: OktmoIndex, progress, workers: int, pool) -> 
 
     elapsed = time.time() - t0
     stats["elapsed"] = elapsed
-    info.update(rows=total, unique_raw=len(uniq), unique_clean=len(uniq_c))
+    info.update(rows=n_rows, unique_raw=len(uniq), unique_clean=len(uniq_c))
     return Result(
         xlsx=xlsx, stats=stats, preview=preview, preview_status=preview_status,
         elapsed=elapsed, timings=timings, info=info,
