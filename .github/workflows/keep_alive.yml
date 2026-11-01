@@ -1,0 +1,21 @@
+name: Keep Streamlit App Awake
+
+on:
+  schedule:
+    # Запуск каждые 10 часов (по Cron-расписанию GitHub)
+    - cron: '0 * * * *'
+  workflow_dispatch: # Позволяет запустить вручную кнопкой
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Push empty commit
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "41898282+github-actions[bot]@://github.com"
+        git commit --allow-empty -m "Keep-alive ping"
+        git push
