@@ -153,7 +153,7 @@ p.sub {{text-align:center; color:#666; margin-bottom:1.6rem;}}
 /* ===== Синяя зона загрузки файла ===== */
 [data-testid="stFileUploader"] section,
 [data-testid="stFileUploaderDropzone"] {{
-    background:#0A3E85 !important;                          /* фон зоны */
+    background:#0b409c !important;                          /* фон зоны */
     border:2px dashed rgba(255,255,255,.85) !important;    /* белый пунктир внутри */
     outline:10px solid #1656B8; outline-offset:-1px;       /* широкая внешняя рамка */
     border-radius:10px;
@@ -170,16 +170,52 @@ p.sub {{text-align:center; color:#666; margin-bottom:1.6rem;}}
 [data-testid="stFileUploaderDropzoneInstructions"]::after {{
     content:"или перетащите файл .xlsx / .xls сюда"; color:#e0efff; font-size:1rem;
 }}
-/* Белая кнопка выбора файла с русской подписью.
+
+/* КОНТУРНАЯ КНОПКА (Вариант 2: Контурный минимализм)
     Красим только stBaseButton-secondary, чтобы не задеть кнопки «удалить»/«добавить». */
 [data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"] {{
-    order:2; background:#fff !important; color:#1f1f1f !important; border:none !important;
-    font-size:0 !important;                 /* прячем исходную английскую подпись */
-    padding:.9rem 2rem !important; border-radius:6px; font-weight:700;
+    order:2; 
+    
+    /* Делаем кнопку прозрачной по умолчанию */
+    background: transparent !important; 
+    border: 2px solid rgba(255, 255, 255, 0.6) !important; /* Белая полупрозрачная рамка */
+    
+    font-size:0 !important; /* прячем исходную английскую подпись */
+    padding:.9rem 2rem !important; 
+    border-radius:12px; 
+    font-weight:700;
+    
+    /* Плавный переход для анимации hover */
+    transition: all 0.2s ease-in-out !important; 
 }}
+
+/* Текст внутри контурной кнопки по умолчанию (белый) */
 [data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"]::after {{
-    content:"ВЫБЕРИТЕ ФАЙЛ"; font-size:1rem; letter-spacing:.02em; color:#1f1f1f;
+    content:"Выберите файл"; 
+    font-size:1rem; 
+    letter-spacing:.02em; 
+    color: #ffffff; /* Белый цвет текста */
+    transition: color 0.2s ease-in-out; /* Плавная смена цвета текста */
 }}
+
+/* Эффект при наведении (hover) — кнопка заливается и приподнимается */
+[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"]:hover {{
+    transform: translateY(-3px) !important; /* Приподнимаем кнопку на 3px вверх */
+    background: #ffffff !important; /* Белая заливка */
+    border-color: #ffffff !important; /* Рамка тоже становится полностью белой */
+    box-shadow: 0 6px 16px rgba(255, 255, 255, 0.2) !important; /* Мягкое свечение кнопки */
+}}
+
+/* Перекрашиваем текст в темный цвет при наведении, когда кнопка становится белой */
+[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"]:hover::after {{
+    color: #0b409c; /* Тёмно-синий текст в цвет вашей зоны (или #1f1f1f, если хотите строго черный) */
+}}
+
+/* Эффект при клике (активное состояние) */
+[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"]:active {{
+    transform: translateY(0) !important; /* Кнопка возвращается на место при нажатии */
+}}
+
 [data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"] * {{ display:none; }}
 /* Кнопка «добавить ещё файл» не нужна: файл всегда один */
 [data-testid="stFileUploaderDropzone"] button[aria-label="Add files"] {{ display:none !important; }}
