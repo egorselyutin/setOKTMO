@@ -89,125 +89,75 @@ METRIC_HELP = {
 FILL_GREEN = "background-color: #92D050; color: #1f1f1f"  # НП найден в исходном адресе
 FILL_RED = "background-color: #FF0000; color: #ffffff"    # НП не найден в исходном адресе
 
-# Фоновая картинка зоны загрузки (карта России). Файл лежит рядом с app.py; если его нет — зона остаётся однотонной.
-# Формат любой (png/jpg). Большой файл автоматически сжимается при запуске (нужен Pillow; он ставится вместе с pandas/streamlit).
-BG_FILE = BASE / "img_r.png"
-BG_H = 330  # высота зоны загрузки, px (картинка по высоте вписывается целиком)
+# Фоновая картинка зоны загрузки (композиция 3000x660, пропорции 1500x330). Файл лежит рядом с app.py;
+# если его нет — зона остаётся однотонной. Формат любой (png/jpg). Большой файл сжимается при запуске (нужен Pillow).
+BG_FILE = BASE / "img_r2.png"
+BG_H = 330  # высота зоны загрузки, px
 
 
-def _bg_prepare():
-    """(data-URI картинки, её ширина при высоте BG_H). Результат кэшируется, пока файл не изменился."""
+def _bg_data_uri() -> str:
+    """Картинка как data-URI (встраивается в страницу). Результат кэшируется, пока файл не изменился."""
     import base64
     import io
 
     mtime = BG_FILE.stat().st_mtime
-    cached = _bg_prepare.__dict__.get("_c")
+    cached = _bg_data_uri.__dict__.get("_c")
     if cached and cached[0] == mtime:
         return cached[1]
     raw = BG_FILE.read_bytes()
-    mime, aspect = ("image/png" if BG_FILE.suffix.lower() == ".png" else "image/jpeg"), 2.5
+    mime = "image/png" if BG_FILE.suffix.lower() == ".png" else "image/jpeg"
     try:
         from PIL import Image
 
         im = Image.open(io.BytesIO(raw))
-        aspect = im.width / im.height
-        if len(raw) > 250_000 or im.width > 1800:  # сжимаем: картинка встраивается в страницу при каждом показе
+        if len(raw) > 400_000 or im.width > 2400:
             im = im.convert("RGB")
-            im.thumbnail((1600, 1600))
+            im.thumbnail((2400, 2400))
             buf = io.BytesIO()
-            im.save(buf, "JPEG", quality=80, optimize=True, progressive=True)
+            im.save(buf, "JPEG", quality=82, optimize=True, progressive=True)
             raw, mime = buf.getvalue(), "image/jpeg"
     except Exception:
         pass
-    res = (f"data:{mime};base64," + base64.b64encode(raw).decode("ascii"), round(BG_H * aspect))
-    _bg_prepare._c = (mtime, res)
-    return res
-
-
-def _pattern_uri() -> str:
-    """Сетевой узор («города-узлы» и дуги, как на карте) для левой части зоны: заполняет пустое место слева и плавно
-    переходит в картинку. Рисуется кодом (SVG), одинаков при каждом запуске (seed). Размер 1800 x BG_H (выровнен по правому краю, лишнее слева обрезается)."""
-    import base64
-    import random
-
-    rnd = random.Random(11)
-    W, H = 1800, BG_H
-    pts = []
-    for gx in range(26):
-        for gy in range(5):
-            if rnd.random() < 0.85:
-                pts.append((round((gx + rnd.random()) * W / 26), round((gy + rnd.random()) * H / 5)))
-    lines, seen = [], set()
-    for i, (x, y) in enumerate(pts):
-        near = sorted(range(len(pts)), key=lambda j: (pts[j][0] - x) ** 2 + (pts[j][1] - y) ** 2)[1:3]
-        for j in near:
-            k = (min(i, j), max(i, j))
-            if k not in seen:
-                seen.add(k)
-                lines.append(f'<line x1="{x}" y1="{y}" x2="{pts[j][0]}" y2="{pts[j][1]}"/>')
-    # «хабы» — по одному узлу на каждую ~170-пиксельную полосу, у середины высоты; между соседними — плавные дуги
-    hubs = []
-    for k in range(10):
-        cx, cy = (k + 0.5) * W / 10, H * (0.35 + 0.3 * rnd.random())
-        hubs.append(min(range(len(pts)), key=lambda i: (pts[i][0] - cx) ** 2 + 2 * (pts[i][1] - cy) ** 2))
-    arcs = []
-    for a, b in zip(hubs, hubs[1:]):
-        (x1, y1), (x2, y2) = pts[a], pts[b]
-        arcs.append(f'<path d="M{x1} {y1} Q{(x1 + x2) // 2} {min(y1, y2) - abs(x2 - x1) // 4} {x2} {y2}"/>')
-    dots = "".join(
-        f'<circle cx="{x}" cy="{y}" r="{1.3 + rnd.random() * 1.6:.1f}"/>' for x, y in pts
-    )
-    glow = "".join(f'<circle cx="{pts[h][0]}" cy="{pts[h][1]}" r="5" fill="url(#g)"/>' for h in hubs)
-    svg = (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}">'
-        '<defs><radialGradient id="g"><stop offset="0" stop-color="#bfe0ff" stop-opacity=".95"/>'
-        '<stop offset="1" stop-color="#4da3ff" stop-opacity="0"/></radialGradient>'
-        '<linearGradient id="f" x1="0" x2="1"><stop offset="0" stop-color="#fff" stop-opacity=".45"/><stop offset=".3" stop-color="#fff"/><stop offset=".78" stop-color="#fff"/>'
-        '<stop offset="1" stop-color="#000"/></linearGradient>'
-        f'<mask id="m"><rect width="{W}" height="{H}" fill="url(#f)"/></mask></defs>'
-        '<g mask="url(#m)">'
-        f'<g stroke="#6fb2ff" stroke-opacity=".34" stroke-width=".9">{"".join(lines)}</g>'
-        f'<g stroke="#9fd0ff" stroke-opacity=".45" stroke-width="1.1" fill="none">{"".join(arcs)}</g>'
-        f'<g fill="#9fd0ff" fill-opacity=".7">{dots}</g>{glow}</g></svg>'
-    )
-    return "data:image/svg+xml;base64," + base64.b64encode(svg.encode()).decode("ascii")
+    uri = f"data:{mime};base64," + base64.b64encode(raw).decode("ascii")
+    _bg_data_uri._c = (mtime, uri)
+    return uri
 
 
 def _bg_css() -> str:
-    """CSS фона зоны загрузки: сетевой узор слева -> карта России справа; всё в полупрозрачной синей вуали,
-    чтобы кнопка и подпись по центру хорошо читались. Вуаль: меньше число в rgba(..., .NN) — картинка ярче."""
+    """CSS фона зоны загрузки. Картинка растягивается на всю зону (cover): при ширине 1500 px видна целиком,
+    на узких экранах обрезаются края. Под кнопкой — лёгкая тёмная вуаль для читаемости (меньше число — ярче)."""
     if _IS_CHILD or not BG_FILE.exists():
         return ""
     try:
-        img, img_w = _bg_prepare()
+        img = _bg_data_uri()
     except Exception:
         return ""
-    pat = _pattern_uri()
     return f"""
-/* ===== Фон зоны загрузки: узор слева + карта России справа ===== */
+/* ===== Фон зоны загрузки ===== */
 [data-testid="stFileUploader"] section,
 [data-testid="stFileUploaderDropzone"] {{
     background-color:#0b409c !important;
     background-image:
-        radial-gradient(ellipse 34% 75% at 50% 50%, rgba(8,44,112,.62) 0%, rgba(8,44,112,0) 100%),  /* вуаль под кнопкой */
-        linear-gradient(90deg, rgba(8,44,112,.35) 0%, rgba(10,60,150,.10) 40%, rgba(11,64,156,0) 100%),
-        url("{pat}"),
-        linear-gradient(90deg, #0b409c, rgba(11,64,156,0)),   /* «растушёвка» левого края картинки: без видимого шва */
+        radial-gradient(ellipse 22% 62% at 50% 52%, rgba(6,36,100,.50) 0%, rgba(6,36,100,0) 100%),  /* вуаль под кнопкой */
         url("{img}") !important;
     background-repeat:no-repeat !important;
-    background-size:100% 100%, 100% 100%, 1800px {BG_H}px, 170px 100%, auto {BG_H}px !important;
-    background-position:0 0, 0 0, right {img_w - 100}px top, right {img_w - 170}px top, right bottom !important;
+    background-size:100% 100%, cover !important;
+    background-position:0 0, center !important;
     min-height:{BG_H}px;
     justify-content:center;
+}}
+@media (max-width: 1480px) {{   /* зона уже картинки: обрезаем слева (деревня), справа (карта и здание) оставляем */
+    [data-testid="stFileUploader"] section,
+    [data-testid="stFileUploaderDropzone"] {{ background-position:0 0, 88% center !important; }}
 }}
 @media (max-width: 900px) {{
     [data-testid="stFileUploader"] section,
     [data-testid="stFileUploaderDropzone"] {{
         background-image:
-            linear-gradient(180deg, rgba(8,44,112,.88) 0%, rgba(11,64,156,.68) 100%),
+            linear-gradient(180deg, rgba(8,44,112,.78) 0%, rgba(11,64,156,.55) 100%),
             url("{img}") !important;
         background-size:100% 100%, cover !important;
-        background-position:0 0, center !important;
+        background-position:0 0, 78% center !important;
     }}
 }}
 """
