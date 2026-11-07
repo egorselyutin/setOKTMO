@@ -92,6 +92,7 @@ FILL_RED = "background-color: #FF0000; color: #ffffff"    # НП не найде
 # Фоновая картинка зоны загрузки (композиция 3000x660, пропорции 1500x330). Файл лежит рядом с app.py;
 # если его нет — зона остаётся однотонной. Формат любой (png/jpg). Большой файл сжимается при запуске (нужен Pillow).
 BG_FILE = BASE / "img_r2.png"
+# BG_FILE = BASE / "sky2.jpg"
 BG_H = 330  # высота зоны загрузки, px
 
 
@@ -311,7 +312,9 @@ p.sub {{text-align:center; color:#666; margin-bottom:1.6rem;}}
 /* >>> ИЗМЕНЕНО: «карточкой» теперь служит весь контейнер (а не только st.metric), чтобы внутри поместилась строка
        с абсолютными числами под значением (.metric-sub). Раньше рамка и тень были у [data-testid="stMetric"]. */
 .st-key-m_recognition, .st-key-m_unrecognized, .st-key-m_accuracy, .st-key-m_doubtful {{
-    background:#fff; border:1px solid #E3E8F0; border-left:6px solid var(--accent, {ACCENT});
+    background:#fff; border:1px solid #E3E8F0; 
+    border: 1px solid var(--accent, {ACCENT});
+    border-left:6px solid var(--accent, {ACCENT});
     border-radius:12px; padding:.5rem 1.2rem !important; height:112px; box-sizing:border-box; justify-content:center; box-shadow:0 6px 20px rgba(16,24,40,.25);
     text-align:center; max-width:260px; margin-inline:auto; gap:0 !important;
 }}
